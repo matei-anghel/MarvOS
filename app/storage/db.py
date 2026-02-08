@@ -110,6 +110,11 @@ class Storage:
             row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
             return None if row is None else str(row["value"])
 
+    def delete_kv(self, key: str) -> None:
+        """Delete a key-value pair from storage."""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+
     def create_run(
         self,
         *,

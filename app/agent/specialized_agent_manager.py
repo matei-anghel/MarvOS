@@ -196,6 +196,9 @@ IMPORTANT:
         Returns:
             Tuple of (agent_id, was_created)
         """
+        import logging
+        log = logging.getLogger(__name__)
+        
         # Check if we have a stored agent for this task type (global)
         storage_key = self._get_agent_storage_key(task_type)
         stored_agent_id = self._storage.get_kv(storage_key)
@@ -205,11 +208,17 @@ IMPORTANT:
             try:
                 agents = await self._mistral.list_cloud_agents()
                 if any(a["id"] == stored_agent_id for a in agents):
+                    log.info(f"[Agent Manager] Found existing agent {stored_agent_id} for {task_type}")
                     return stored_agent_id, False
-            except Exception:
+                # Agent was deleted from Mistral dashboard - clear stale IDs
+                log.warning(f"[Agent Manager] Stored agent {stored_agent_id} no longer exists for {task_type}, clearing stale IDs")
+                self._storage.delete_kv(storage_key)
+                # Also clear conversation ID since it's tied to the deleted agent
+                conversation_key = self._get_conversation_storage_key(task_type)
+                self._storage.delete_kv(conversation_key)
+            except Exception as e:
+                log.warning(f"[Agent Manager] Failed to verify agent {stored_agent_id}: {e}, using stored ID")
                 return stored_agent_id, False
-            # Stored agent was not found; fall through to find an existing match or create.
-        
         # Get template for this task type
         template = self.TASK_TEMPLATES.get(task_type, self.TASK_TEMPLATES["general_research"])
 
@@ -217,13 +226,16 @@ IMPORTANT:
         try:
             existing_id = await self._find_existing_agent_id(template_name=template["name"], template_desc=template["description"])
             if existing_id:
+                log.info(f"[Agent Manager] Found existing agent by name '{template['name']}': {existing_id}")
                 self._storage.put_kv(storage_key, existing_id)
                 return existing_id, False
-        except Exception:
+            log.info(f"[Agent Manager] No existing agent found with name '{template['name']}', will create new one")
+        except Exception as e:
             # If listing agents fails, we can't reuse by search; continue to creation.
-            pass
+            log.warning(f"[Agent Manager] Failed to search for existing agent: {e}")
         
         # Create new agent with capabilities
+        log.info(f"[Agent Manager] Creating new {task_type} agent with model {self._config.specialized_agent_model}")
         agent_id = await self._mistral.create_cloud_agent_with_capabilities(
             name=template["name"],
             description=template["description"],
@@ -233,7 +245,8 @@ IMPORTANT:
             capabilities=self._config.specialized_agent_capabilities,
         )
         
-        # Store the agent ID (session-scoped)
+        # Store the agent ID (globally, not session-scoped)
+        log.info(f"[Agent Manager] Created new agent {agent_id} for {task_type}")
         self._storage.put_kv(storage_key, agent_id)
         
         return agent_id, True
