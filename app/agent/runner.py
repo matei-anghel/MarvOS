@@ -315,7 +315,7 @@ class RunManager:
             if tool_def is None:
                 result = {"ok": False, "error": f"Unknown tool: {tool_name}"}
             else:
-                if tool_def.requires_approval and not (options.auto_approve_medium and tool_def.risk == "MEDIUM"):
+                if tool_def.requires_approval_for_args(args) and not (options.auto_approve_medium and tool_def.risk == "MEDIUM"):
                     await self._hub.publish(
                         session_id,
                         run_id,

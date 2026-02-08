@@ -99,6 +99,42 @@ class ToolDef:
     @property
     def requires_approval(self) -> bool:
         return self.risk in {"HIGH", "MEDIUM"}
+    
+    def requires_approval_for_args(self, args: dict[str, Any]) -> bool:
+        """Check if approval is needed based on tool and arguments."""
+        if self.risk == "LOW":
+            return False
+        # For PowerShell, check if command is read-only
+        if self.name == "shell.exec_powershell":
+            cmd = str(args.get("command", "")).lower()
+            # List of read-only/safe commands
+            safe_patterns = [
+                "get-", "select-", "where-", "sort-", "measure-",
+                "write-host", "echo", "format-", "convertTo-",
+                "test-path", "resolve-path", "split-path", "join-path",
+                "get-childitem", "gci", "ls", "dir",
+                "get-content", "gc", "cat", "type",
+            ]
+            # Dangerous patterns that override safety
+            dangerous_patterns = [
+                "remove-", "rm ", "del ", "erase", "rmdir",
+                "new-item", "ni ", "mkdir", "md ",
+                "set-", "clear-", "stop-", "restart-",
+                "invoke-webrequest", "iwr", "wget", "curl",
+                "start-process", "&", "invoke-expression", "iex",
+            ]
+            # Check for dangerous patterns first
+            if any(p in cmd for p in dangerous_patterns):
+                print(f"[APPROVAL] PowerShell command requires approval (dangerous): {cmd[:100]}")
+                return True
+            # If only safe patterns, no approval needed
+            if any(p in cmd for p in safe_patterns):
+                print(f"[APPROVAL] PowerShell command auto-approved (read-only): {cmd[:100]}")
+                return False
+            # Unknown command - require approval to be safe
+            print(f"[APPROVAL] PowerShell command requires approval (unknown): {cmd[:100]}")
+            return True
+        return self.risk in {"HIGH", "MEDIUM"}
 
     def summarize(self, args: dict[str, Any]) -> str:
         if self.name == "user.confirm":
