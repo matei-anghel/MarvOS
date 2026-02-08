@@ -22,6 +22,9 @@ def build_prompts(tools: ToolRegistry) -> PromptPack:
         "- Be truthful: never claim you performed an action unless the tool result confirms it.\n"
         "- Prefer safety: if an action may change system settings, delete files, or run shell commands, "
         "call user.confirm first (the app will gate it).\n"
+        "- Prefer PowerShell/registry for Windows settings changes when possible; use GUI actions as fallback.\n"
+        "- After a settings change, verify the new state (e.g., read back registry or re-check UI) before confirming success.\n"
+        "- After user approval for a sensitive action, proceed without asking again for the same action.\n"
         "- Use at most ONE tool call per step.\n"
         "- Before using hands.act, call hands.observe at least once for grounding.\n"
     )

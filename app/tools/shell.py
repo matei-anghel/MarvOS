@@ -17,13 +17,14 @@ _DENY_SUBSTRINGS = [
 ]
 
 
-async def exec_powershell(*, command: str, cwd: str | None, timeout_s: int) -> dict[str, Any]:
+async def exec_powershell(*, command: str, cwd: str | None, timeout_s: int, approved_by_user: bool = False) -> dict[str, Any]:
     if os.name != "nt":
         return {"ok": False, "error": "PowerShell execution is only supported on Windows in this MVP."}
 
-    for bad in _DENY_SUBSTRINGS:
-        if bad.lower() in command.lower():
-            return {"ok": False, "error": f"Command blocked by policy (matched: {bad})."}
+    if not approved_by_user:
+        for bad in _DENY_SUBSTRINGS:
+            if bad.lower() in command.lower():
+                return {"ok": False, "error": f"Command blocked by policy (matched: {bad})."}
 
     def _run() -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(

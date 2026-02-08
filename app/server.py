@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -8,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+
+log = logging.getLogger(__name__)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.agent.runner import RunManager
@@ -16,7 +21,6 @@ from app.events import Event, WebSocketHub
 from app.hands.hands_iface import Hands
 from app.hands.stub_hands import StubHands
 from app.hands.windows_use_adapter import WindowsUseHands
-from app.llm.fake_gateway import FakeMistralGateway
 from app.llm.mistral_gateway import MistralGateway
 from app.storage.db import Storage
 from app.storage.paths import ensure_data_dirs
@@ -75,8 +79,6 @@ def _hands_from_env() -> Hands:
 
 
 def _mistral_from_env() -> MistralGateway:
-    if os.environ.get("MARVOS_FAKE_LLM") == "1":
-        return FakeMistralGateway()
     return MistralGateway()
 
 
@@ -129,6 +131,42 @@ def create_app() -> FastAPI:
     async def ui_css() -> FileResponse:
         return FileResponse(_load_ui_file("app.css"))
 
+    @app.get("/vendor/marked.min.js")
+    async def vendor_marked() -> FileResponse:
+        return FileResponse(_load_ui_file("vendor/marked.min.js"))
+
+    @app.get("/vendor/purify.min.js")
+    async def vendor_purify() -> FileResponse:
+        return FileResponse(_load_ui_file("vendor/purify.min.js"))
+
+    @app.get("/favicon.ico")
+    async def favicon_ico() -> FileResponse:
+        return FileResponse(_load_ui_file("favicon.ico"))
+
+    @app.get("/favicon-16x16.png")
+    async def favicon_16() -> FileResponse:
+        return FileResponse(_load_ui_file("favicon-16x16.png"))
+
+    @app.get("/favicon-32x32.png")
+    async def favicon_32() -> FileResponse:
+        return FileResponse(_load_ui_file("favicon-32x32.png"))
+
+    @app.get("/apple-touch-icon.png")
+    async def apple_touch() -> FileResponse:
+        return FileResponse(_load_ui_file("apple-touch-icon.png"))
+
+    @app.get("/android-chrome-192x192.png")
+    async def android_192() -> FileResponse:
+        return FileResponse(_load_ui_file("android-chrome-192x192.png"))
+
+    @app.get("/android-chrome-512x512.png")
+    async def android_512() -> FileResponse:
+        return FileResponse(_load_ui_file("android-chrome-512x512.png"))
+
+    @app.get("/site.webmanifest")
+    async def webmanifest() -> FileResponse:
+        return FileResponse(_load_ui_file("site.webmanifest"))
+
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket, session_id: str):
         await ws.accept()
@@ -180,6 +218,8 @@ def create_app() -> FastAPI:
         )
         return JSONResponse({"ok": ok})
 
+    # ── Dictation: file-based fallback (Voxtral Mini Transcribe V2) ──────
+
     @app.post("/dictation/transcribe")
     async def transcribe(request: Request, file: UploadFile = File(...)) -> JSONResponse:
         services: Services = request.app.state.services
@@ -192,6 +232,86 @@ def create_app() -> FastAPI:
             language=language,
         )
         return JSONResponse({"text": text})
+
+    # ── Dictation: realtime streaming via WebSocket ──────────────────────
+    #
+    # Protocol (binary + text frames):
+    #   Client → Server:  binary frames with raw PCM S16LE 16 kHz mono
+    #                      text frame '{"type":"stop"}' to end the stream
+    #   Server → Client:  text frames:
+    #       {"type":"delta","text":"..."}
+    #       {"type":"done"}
+    #       {"type":"error","text":"..."}
+    #       {"type":"ready"}  (sent once the Mistral session is up)
+
+    @app.websocket("/ws/dictation")
+    async def ws_dictation(ws: WebSocket):
+        await ws.accept()
+        services: Services = app.state.services
+        model = services.config.default_audio_model_realtime
+
+        # Async queue bridges the WS binary frames → async iterator for Mistral.
+        audio_q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
+
+        async def _audio_iter():
+            while True:
+                chunk = await audio_q.get()
+                if chunk is None:
+                    return
+                yield chunk
+
+        async def _reader():
+            """Read frames from the browser and feed them into the audio queue."""
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        break
+                    if "bytes" in msg and msg["bytes"]:
+                        await audio_q.put(msg["bytes"])
+                    elif "text" in msg:
+                        try:
+                            payload = json.loads(msg["text"])
+                        except Exception:
+                            continue
+                        if payload.get("type") == "stop":
+                            break
+            except WebSocketDisconnect:
+                pass
+            finally:
+                # Signal end-of-stream to the iterator.
+                await audio_q.put(None)
+
+        async def _writer():
+            """Stream Mistral realtime events back to the browser."""
+            try:
+                await ws.send_text(json.dumps({"type": "ready"}))
+                async for evt in services.mistral.transcribe_realtime(
+                    model=model,
+                    audio_stream=_audio_iter(),
+                ):
+                    await ws.send_text(json.dumps(evt))
+                    if evt.get("type") in ("done", "error"):
+                        break
+            except Exception as exc:
+                log.exception("Realtime transcription writer error")
+                try:
+                    await ws.send_text(json.dumps({"type": "error", "text": str(exc)}))
+                except Exception:
+                    pass
+
+        reader_task = asyncio.create_task(_reader())
+        writer_task = asyncio.create_task(_writer())
+        try:
+            await asyncio.gather(reader_task, writer_task)
+        except Exception:
+            reader_task.cancel()
+            writer_task.cancel()
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     @app.get("/artifacts/{artifact_id}")
     async def get_artifact(artifact_id: str, request: Request):

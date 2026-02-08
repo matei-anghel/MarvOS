@@ -8,5 +8,5 @@ dist/
 build/
 data/
 *.log
-
+*.env
 marvos_windows_llm_ui.egg-info/

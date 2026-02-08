@@ -3,8 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MarvOS Agent</title>
+    <title>MarvOS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500&family=Silkscreen:wght@400;700&display=swap" rel="stylesheet" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="manifest" href="/site.webmanifest">
     <link rel="stylesheet" href="/app.css" />
+    <link id="hljsLight" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css" />
+    <link id="hljsDark" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark-dimmed.min.css" disabled />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
     <script>
       (function () {
         try {
@@ -19,69 +29,173 @@
   </head>
   <body>
     <div id="app">
-      <header>
-        <div class="brand">
-          <div id="marvin" class="marvin" aria-label="Marvin mascot"></div>
-          <div class="brandText">
-            <div class="title">MarvOS Agent</div>
-            <div class="subtitle">hands · eyes · voice</div>
-          </div>
+      <!-- Custom title bar -->
+      <div class="titlebar" id="titlebar">
+        <div class="titlebar-drag pywebview-drag-region" id="titlebarDrag" aria-hidden="true"></div>
+        <div class="titlebar-controls">
+          <button class="titlebar-btn" id="titleMinBtn" title="Minimize">
+            <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+          </button>
+          <button class="titlebar-btn" id="titleMaxBtn" title="Maximize">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1"/></svg>
+          </button>
+          <button class="titlebar-btn titlebar-btn--close" id="titleCloseBtn" title="Close">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
         </div>
-        <div class="controls">
-          <button id="themeBtn" class="ghost" title="Toggle theme">Theme: …</button>
-          <button id="stopBtn" class="danger" disabled>STOP</button>
-          <button id="micBtn" class="ghost">Dictation</button>
-        </div>
-      </header>
+      </div>
 
-      <main>
-        <section class="left">
-          <div class="panel">
-            <div class="panel-title">Chat</div>
-            <div id="chatLog" class="chat"></div>
-            <div class="row inputWrap">
-              <textarea id="chatInput" placeholder="Ask the agent..." rows="2"></textarea>
-              <button id="sendBtn" class="accent">Send</button>
+      <div class="rainbow-strip" aria-hidden="true"></div>
+
+      <!-- Frameless window resize handles (pywebview) -->
+      <div class="window-resize window-resize--n" data-window-resize="n" aria-hidden="true"></div>
+      <div class="window-resize window-resize--e" data-window-resize="e" aria-hidden="true"></div>
+      <div class="window-resize window-resize--s" data-window-resize="s" aria-hidden="true"></div>
+      <div class="window-resize window-resize--w" data-window-resize="w" aria-hidden="true"></div>
+      <div class="window-resize window-resize--ne" data-window-resize="ne" aria-hidden="true"></div>
+      <div class="window-resize window-resize--nw" data-window-resize="nw" aria-hidden="true"></div>
+      <div class="window-resize window-resize--se" data-window-resize="se" aria-hidden="true"></div>
+      <div class="window-resize window-resize--sw" data-window-resize="sw" aria-hidden="true"></div>
+
+      <div class="app-body">
+        <!-- Left sidebar: Tasks -->
+        <aside id="sidebarLeft" class="sidebar sidebar--left">
+          <div class="sidebar-top">
+            <div class="brand brand--sidebar">
+              <span class="brand-name">MarvOS</span>
+              <button id="sidebarToggle" class="sidebar-toggle-icon" title="Toggle tasks" aria-label="Toggle tasks">
+                <div id="marvin" class="marvin marvin--sidebar" aria-hidden="true"></div>
+                <div class="sidebar-hover-icon">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+              </button>
             </div>
-            <div class="row presets">
-              <button data-preset="Organize my Downloads folder by file type.">Folder organizer</button>
-              <button data-preset="Change a Windows setting: show file extensions.">Windows setting</button>
-              <button data-preset="In PowerShell, find the 10 largest files under my home directory.">Terminal utility</button>
-              <button data-preset="Use vibe-cli to build a simple website, then inspect the result via screenshot and propose fixes.">Vibe-cli loop</button>
-              <button data-preset="Plan a Paris trip for next week. If needed, create a persistent cloud agent first.">Paris trip</button>
+          </div>
+          <div class="sidebar-header">
+            <h2 class="sidebar-title">Tasks</h2>
+            <button id="newTaskBtn" class="btn btn--ghost btn--icon" title="New task">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <div id="taskList" class="task-list"></div>
+          <div class="sidebar-footer">
+            <button id="themeBtn" class="btn btn--ghost btn--icon" title="Toggle theme">
+              <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" fill="currentColor"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 9.68A6.5 6.5 0 0 1 6.32 2 6.5 6.5 0 1 0 14 9.68Z" fill="currentColor"/></svg>
+            </button>
+          </div>
+        </aside>
+        <div class="resize-handle" id="resizeLeft" title="Resize sidebar"></div>
+
+        <!-- Main chat area -->
+        <section class="main-chat">
+          <div id="chatLog" class="chat-log"></div>
+
+          <div class="composer">
+            <div class="composer-hero">
+              <div id="marvinHero" class="marvin marvin--hero" aria-hidden="true"></div>
+            </div>
+            <div class="presets" id="presets">
+              <button class="preset-chip" data-preset="Organize my Downloads folder by file type.">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 3h5l2 2h5v8H2V3Z" stroke="currentColor" stroke-width="1.3" fill="none"/></svg>
+                Folder organizer
+              </button>
+              <button class="preset-chip" data-preset="Change a Windows setting: show file extensions.">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2Zm0 3v3l2 1" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>
+                Windows setting
+              </button>
+              <button class="preset-chip" data-preset="In PowerShell, find the 10 largest files under my home directory.">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 4l4 4-4 4M9 12h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+                Terminal utility
+              </button>
+              <button class="preset-chip" data-preset="Use vibe-cli to build a simple website, then inspect the result via screenshot and propose fixes.">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M5 2l-3 6 3 6M11 2l3 6-3 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg>
+                Vibe-cli loop
+              </button>
+              <button class="preset-chip" data-preset="Plan a Paris trip for next week. If needed, create a persistent cloud agent first.">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 14l3-8 3 4 2-3 4 7H2Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/></svg>
+                Paris trip
+              </button>
+            </div>
+            <div class="input-row">
+              <textarea id="chatInput" placeholder="Give a task to Marvin..." rows="1"></textarea>
+              <button id="micBtn" class="btn btn--ghost btn--icon composer-mic" title="Dictation">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0v-4A2.5 2.5 0 0 0 8 1Z" fill="currentColor" opacity="0.85"/><path d="M4 6.5a.5.5 0 0 1 1 0v1a3 3 0 0 0 6 0v-1a.5.5 0 0 1 1 0v1a4 4 0 0 1-3.5 3.97V13.5h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.03A4 4 0 0 1 4 7.5v-1Z" fill="currentColor"/></svg>
+              </button>
+              <button id="stopBtn" class="btn btn--danger btn--icon btn--stop" title="Stop run">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="4" y="4" width="8" height="8" rx="1.6" fill="currentColor"/></svg>
+              </button>
+              <button id="sendBtn" class="btn btn--primary btn--icon" title="Send message">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 13V3l11 5-11 5Z" fill="currentColor"/></svg>
+              </button>
             </div>
           </div>
         </section>
+        <div class="resize-handle" id="resizeRight" title="Resize inspector"></div>
 
-        <section class="right">
-          <div class="panel">
-            <div class="panel-title">Run Inspector</div>
-            <div id="statusLine" class="status">Idle</div>
-            <div id="eventsLog" class="events"></div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-title">Vision</div>
-            <div class="vision">
-              <img id="visionImg" alt="screenshot" />
-              <pre id="visionText"></pre>
+        <!-- Right sidebar: Inspector + Vision -->
+        <aside id="sidebarRight" class="sidebar sidebar--right">
+          <div class="sidebar-header">
+            <h2 class="sidebar-title">Inspector</h2>
+            <div id="statusLine" class="status-pill">
+              <span class="status-dot"></span>
+              <span class="status-label">Idle</span>
+            </div>
+            <div class="sidebar-header-actions">
+              <button id="clearEventsBtn" class="btn btn--ghost btn--xs" title="Clear">Clear</button>
+              <button id="inspectorClose" class="btn btn--ghost btn--icon" title="Collapse inspector">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M10 2.5v11" stroke="currentColor" stroke-width="1.3"/></svg>
+              </button>
             </div>
           </div>
-        </section>
-      </main>
+          <div class="inspector-body">
+            <div class="inspector-section">
+              <h3 class="inspector-section-title">Run Events</h3>
+              <div id="eventsLog" class="events-log"></div>
+            </div>
+          </div>
+        </aside>
+        <button id="inspectorToggle" class="inspector-toggle" title="Toggle inspector">
+          <svg width="8" height="14" viewBox="0 0 8 14" fill="none"><path d="M7 1L1 7l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
     </div>
 
-    <div id="approvalModal" class="modal hidden">
+    <div id="approvalModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop"></div>
       <div class="modal-card">
-        <div class="modal-title">Approval required</div>
+        <div class="modal-header">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 2L1 18h18L10 2Z" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M10 8v4M10 14v1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <h3 class="modal-title">Approval Required</h3>
+        </div>
         <div id="approvalSummary" class="modal-body"></div>
         <div class="modal-actions">
-          <button id="approveBtn" class="danger">Approve</button>
-          <button id="denyBtn" class="ghost">Deny</button>
+          <button id="denyBtn" class="btn btn--ghost">Deny</button>
+          <button id="approveBtn" class="btn btn--danger">Approve</button>
         </div>
       </div>
     </div>
 
-    <script src="/app.js"></script>
+    <div id="confirmModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+      <div class="modal-backdrop" id="confirmBackdrop"></div>
+      <div class="modal-card">
+        <div class="modal-header">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 3h6m-8 4h10m-9 0l1 14h6l1-14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v7M14 11v7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <h3 id="confirmTitle" class="modal-title">Delete chat?</h3>
+        </div>
+        <div id="confirmBody" class="modal-body">This cannot be undone.</div>
+        <div class="modal-actions">
+          <button id="confirmCancelBtn" class="btn btn--ghost">Cancel</button>
+          <button id="confirmOkBtn" class="btn btn--danger">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <script defer src="/vendor/purify.min.js"></script>
+    <script defer src="/vendor/marked.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <script defer src="/app.js"></script>
   </body>
 </html>

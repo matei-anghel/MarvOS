@@ -149,29 +149,62 @@ class RunManager:
             steps += 1
             tools_schema = self._tools.to_mistral_tools()
 
-            resp = await self._mistral.chat_complete(
+            full_content = ""
+            tool_calls_acc: dict[int, dict[str, Any]] = {}
+            
+            async for chunk in self._mistral.chat_stream(
                 model=self._config.default_text_model,
                 messages=message_history,
                 tools=tools_schema,
                 tool_choice="auto",
-                parallel_tool_calls=False,
-            )
+            ):
+                delta = chunk.get("delta")
+                if not delta:
+                    continue
+                
+                # Content delta
+                content = getattr(delta, "content", None)
+                if content:
+                    full_content += content
+                    await self._hub.publish(
+                        session_id,
+                        run_id,
+                        Event("assistant.delta", {"run_id": run_id, "text": content}),
+                    )
+                
+                # Tool call deltas
+                tcs = getattr(delta, "tool_calls", None)
+                if tcs:
+                    for tc in tcs:
+                        idx = tc.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": tc.id or "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""}
+                            }
+                        if tc.id:
+                            tool_calls_acc[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_acc[idx]["function"]["name"] += tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["function"]["arguments"] += tc.function.arguments
 
-            assistant_message = resp.get("message", {})
+            # Build the assistant message to append to history
+            assistant_message: dict[str, Any] = {"role": "assistant", "content": full_content}
+            
+            if tool_calls_acc:
+                # Convert accumulated dict to list sorted by index
+                sorted_tcs = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+                assistant_message["tool_calls"] = sorted_tcs
+
             if assistant_message:
                 message_history.append(assistant_message)
 
             tool_calls = assistant_message.get("tool_calls") or []
             if not tool_calls:
-                text = assistant_message.get("content") or ""
-                # Best-effort streaming: emit deltas quickly so the UI can render incrementally.
-                for i in range(0, len(text), 200):
-                    await self._hub.publish(
-                        session_id,
-                        run_id,
-                        Event("assistant.delta", {"run_id": run_id, "text": text[i : i + 200]}),
-                    )
-                await self._hub.publish(session_id, run_id, Event("assistant.final", {"run_id": run_id, "text": text}))
+                await self._hub.publish(session_id, run_id, Event("assistant.final", {"run_id": run_id, "text": full_content}))
                 return
 
             if len(tool_calls) != 1:
@@ -237,6 +270,9 @@ class RunManager:
                             ),
                         )
                         continue
+
+                    if tool_name == "shell.exec_powershell":
+                        args["approved_by_user"] = True
 
                 result = await self._tools.execute(tool_name=tool_name, args=args, session_id=session_id, run_id=run_id)
 

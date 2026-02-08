@@ -29,6 +29,7 @@ class _ShellExecArgs(BaseModel):
     command: str
     cwd: str | None = None
     timeout_s: int = Field(default=30, ge=1, le=600)
+    approved_by_user: bool = False
 
 
 class _FsListArgs(BaseModel):
@@ -178,7 +179,12 @@ def build_default_registry(
     async def shell_exec(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
         from app.tools.shell import exec_powershell
 
-        return await exec_powershell(command=args["command"], cwd=args.get("cwd"), timeout_s=args["timeout_s"])
+        return await exec_powershell(
+            command=args["command"],
+            cwd=args.get("cwd"),
+            timeout_s=args["timeout_s"],
+            approved_by_user=bool(args.get("approved_by_user")),
+        )
 
     async def fs_list(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
         from app.tools.filesystem import list_dir
