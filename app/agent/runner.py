@@ -178,7 +178,7 @@ class RunManager:
             print(f"[DEBUG] First message role: {message_history[0]['role'] if message_history else 'None'}")
             
             async for chunk in self._mistral.chat_stream(
-                model=self._config.default_model,
+                model=self._config.default_agent_model,
                 messages=message_history,
                 tools=tools_schema,
                 tool_choice="auto",

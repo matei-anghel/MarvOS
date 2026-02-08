@@ -17,7 +17,7 @@ from app.storage.db import Storage
 
 
 class _HandsObserveArgs(BaseModel):
-    include_screenshot: bool = True
+    include_screenshot: bool = False  # Screenshots are expensive - use only when needed
     ui_tree_depth: int = Field(default=10, ge=0, le=20)
 
 
@@ -228,7 +228,7 @@ def build_default_registry(
         if artifact is None:
             return {"ok": False, "error": "artifact not found"}
         png = Path(artifact.path).read_bytes()
-        res = await mistral.inspect_screenshot(model=config.default_model, screenshot_png_bytes=png, prompt=args["prompt"])
+        res = await mistral.inspect_screenshot(model=config.default_vision_model, screenshot_png_bytes=png, prompt=args["prompt"])
         return {"ok": True, "data": res}
 
     async def agents_create(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
@@ -274,11 +274,10 @@ def build_default_registry(
         "hands.observe": ToolDef(
             name="hands.observe",
             description=(
-                "Observe current desktop state with ELEMENT LABELING. "
-                "Returns: active window, list of open windows, and interactive_elements list with numbered labels (0, 1, 2...). "
-                "Each element has: label, name, control_type, coordinates [x,y], window name. "
-                "When include_screenshot=true, elements are visually labeled on the screenshot. "
-                "Use these labels in hands.act to precisely target elements."
+                "Observe desktop state via accessibility tree (FAST, no screenshot by default). "
+                "Returns: active window, windows list, and interactive_elements with labels/names/coordinates. "
+                "SCREENSHOT IS OPTIONAL: Use include_screenshot=true ONLY for final verification or when confused. "
+                "The element list alone is sufficient for navigation - element names tell you everything."
             ),
             args_model=_HandsObserveArgs,
             handler=hands_observe,
@@ -287,18 +286,16 @@ def build_default_registry(
         "hands.act": ToolDef(
             name="hands.act",
             description=(
-                "Perform GUI actions using labeled elements from hands.observe. "
-                "ELEMENT LABELING: Each interactive element has a numbered label (0, 1, 2...) shown on the screenshot. "
-                "Supported actions: "
+                "Perform GUI actions using elements from hands.observe. "
+                "Use element labels/names from the observe results - NO screenshots needed. "
+                "Actions: "
                 "click by label: {type:'click', element_label:5}; "
-                "click by coordinates: {type:'click', x:100, y:200}; "
-                "click by name: {type:'click', name:'Night light'}; "
-                "type: {type:'type', element_label:3, text:'hello', clear:true, submit:true}; "
-                "scroll: {type:'scroll', element_label:4, direction:'down', wheel_times:3}; "
+                "click by name: {type:'click', name:'Display'}; "
+                "scroll (use wheel_times=10+): {type:'scroll', direction:'down', wheel_times:10}; "
                 "shortcut: {type:'shortcut', shortcut:'win+i'}; "
-                "hotkey: {type:'hotkey', keys:['ctrl','c']}; "
-                "wait: {type:'wait', ms:800}; "
-                "launch app: {type:'launch', app:'Settings'} or {type:'app', mode:'launch', name:'Notepad'}."
+                "wait: {type:'wait', ms:500}; "
+                "type: {type:'type', element_label:8, text:'query', submit:true}. "
+                "BATCH actions: Do multiple clicks/scrolls between observes."
             ),
             args_model=_HandsActArgs,
             handler=hands_act,

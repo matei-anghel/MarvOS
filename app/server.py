@@ -104,7 +104,9 @@ async def _lifespan(app: FastAPI):
     print(f"MarvOS Server Starting")
     print(f"{'='*60}")
     print(f"Hands type: {type(hands).__name__}")
-    print(f"Model: {config.default_model}")
+    print(f"Chat Model: {config.default_chat_model}")
+    print(f"Agent Model: {config.default_agent_model}")
+    print(f"Vision Model: {config.default_vision_model}")
     print(f"{'='*60}\n")
     
     tools = build_default_registry(config=config, storage=storage, hub=hub, hands=hands, mistral=mistral)
