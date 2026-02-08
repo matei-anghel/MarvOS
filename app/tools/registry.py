@@ -135,7 +135,10 @@ class ToolRegistry:
         tool = self.tools.get(tool_name)
         if tool is None:
             return {"ok": False, "error": f"Unknown tool: {tool_name}"}
-        parsed = tool.args_model(**args)
+        try:
+            parsed = tool.args_model(**args)
+        except Exception as e:
+            return {"ok": False, "error": f"Invalid tool args: {e}"}
         return await tool.handler(parsed.model_dump(), session_id, run_id)
 
 
@@ -268,7 +271,12 @@ def build_default_registry(
         ),
         "hands.act": ToolDef(
             name="hands.act",
-            description="Perform GUI actions (click/type/hotkey/launch).",
+            description=(
+                "Perform GUI actions. Supported actions (best-effort): "
+                "click: {type:'click',x,y} or {type:'click',path:[...]} or {type:'click',name:'...'}; "
+                "hotkey: {type:'hotkey',keys:[...]} or {type:'hotkey',value:'win+i'}; "
+                "type: {type:'type',text:'...',submit:true|false}; wait/launch/drag_drop are also available."
+            ),
             args_model=_HandsActArgs,
             handler=hands_act,
             risk="MEDIUM",

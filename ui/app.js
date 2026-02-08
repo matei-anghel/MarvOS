@@ -53,6 +53,114 @@ function summarizeOneLine(text, maxLen = 160) {
   return trimmed.slice(0, Math.max(0, maxLen - 4)).trimEnd() + " ...";
 }
 
+function friendlyEventType(type) {
+  const map = {
+    "run.created": "Started",
+    "run.status": "Status",
+    "tool.requested": "Action",
+    "tool.result": "Result",
+    "artifact.created": "Screenshot",
+    "assistant.final": "Response",
+    "assistant.delta": "Typing",
+    "approval.requested": "Approval Needed",
+    "approval.resolved": "Approval",
+    "error": "Error",
+  };
+  return map[type] || type || "?";
+}
+
+function friendlyToolName(name) {
+  const map = {
+    "hands.observe": "Observing the screen",
+    "hands.act": "Performing desktop action",
+    "vision.inspect_screenshot": "Analyzing screenshot",
+    "shell.exec_powershell": "Running command",
+    "fs.list": "Listing files",
+    "fs.mkdir": "Creating folder",
+    "fs.move": "Moving file",
+    "fs.rename": "Renaming file",
+    "fs.delete": "Deleting file",
+    "user.confirm": "Asking for confirmation",
+    "mistral_agents.create": "Creating agent",
+    "mistral_agents.chat": "Chatting with agent",
+    "dictation.transcribe": "Transcribing audio",
+  };
+  return map[name] || name || "Unknown tool";
+}
+
+function friendlyToolDetail(toolName, args) {
+  if (!args) return "";
+  if (toolName === "hands.observe") {
+    const parts = [];
+    if (args.include_screenshot) parts.push("with screenshot");
+    return parts.length ? ` (${parts.join(", ")})` : "";
+  }
+  if (toolName === "hands.act") {
+    const actions = args.actions || [];
+    const descs = actions.map(a => {
+      if (a.type === "click") {
+        if (a.name) return `click "${a.name}"`;
+        if (a.path) return `click ${Array.isArray(a.path) ? a.path.join(" > ") : a.path}`;
+        if (a.x != null && a.y != null) return `click at (${a.x}, ${a.y})`;
+        return "click";
+      }
+      if (a.type === "hotkey") {
+        const keys = a.keys ? a.keys.join("+") : (a.value || "");
+        return `press ${keys}`;
+      }
+      if (a.type === "type") return `type "${(a.text || "").slice(0, 40)}"`;
+      if (a.type === "wait") return `wait ${a.ms || 0}ms`;
+      if (a.type === "launch") return `launch ${a.app || ""}`;
+      return a.type || "action";
+    });
+    return descs.length ? `: ${descs.join(", ")}` : "";
+  }
+  if (toolName === "shell.exec_powershell") {
+    const cmd = (args.command || "").slice(0, 80);
+    return cmd ? `: ${cmd}` : "";
+  }
+  if (toolName === "vision.inspect_screenshot") {
+    const prompt = (args.prompt || "").slice(0, 60);
+    return prompt ? `: "${prompt}${args.prompt && args.prompt.length > 60 ? '…' : ''}"` : "";
+  }
+  if (toolName === "fs.list") return `: ${args.path || ""}`;
+  if (toolName === "fs.delete") return `: ${args.path || ""}`;
+  if (toolName === "fs.move") return `: ${args.src || ""} → ${args.dst || ""}`;
+  if (toolName === "fs.rename") return `: ${args.src || ""} → ${args.dst || ""}`;
+  return "";
+}
+
+function friendlyStatusLabel(status) {
+  const map = {
+    queued: "Queued",
+    running: "Running",
+    awaiting_approval: "Waiting for approval",
+    succeeded: "Succeeded",
+    failed: "Failed",
+    canceled: "Canceled",
+  };
+  return map[status] || status || "";
+}
+
+function friendlyResultSummary(toolName, result) {
+  if (!result) return "Done";
+  if (result.ok === false) return `Failed: ${result.error || "unknown error"}`;
+  if (toolName === "hands.observe") return "Screen observed";
+  if (toolName === "hands.act") {
+    const d = result.data || result;
+    const actions = d.performed_actions || [];
+    const allOk = actions.every(a => a.ok);
+    return allOk ? `Action completed (${actions.length} step${actions.length !== 1 ? "s" : ""})` : "Some actions failed";
+  }
+  if (toolName === "vision.inspect_screenshot") return "Analysis complete";
+  if (toolName === "shell.exec_powershell") {
+    const d = result.data || result;
+    const code = d.exit_code;
+    return code === 0 ? "Command succeeded" : `Command finished (exit code ${code})`;
+  }
+  return "Done";
+}
+
 function renderEventLine(obj) {
   if (!obj) return null;
   const payload = obj.payload || obj;
@@ -66,7 +174,7 @@ function renderEventLine(obj) {
 
   const type = document.createElement("span");
   type.className = "event-type";
-  type.textContent = ` ${obj.type || "?"}`;
+  type.textContent = ` ${friendlyEventType(obj.type)}`;
 
   let detail = document.createElement("span");
   detail.className = "event-detail";
@@ -77,7 +185,7 @@ function renderEventLine(obj) {
     detail.className = "event-detail event-detail--media";
     const label = document.createElement("div");
     label.className = "event-detail-text";
-    label.textContent = ` screenshot artifact: ${payload.artifact_id}`;
+    label.textContent = " Captured screenshot";
     const img = document.createElement("img");
     img.className = "event-image";
     img.alt = "screenshot";
@@ -88,8 +196,25 @@ function renderEventLine(obj) {
     const full = payload.text || "";
     detail.classList.add("event-detail--one-line");
     detail.textContent = " " + summarizeOneLine(full);
-    // Keep the full text available for selection/copy if needed.
     detail.dataset.full = full;
+  } else if (obj.type === "run.created") {
+    detail.textContent = " New task started";
+  } else if (obj.type === "run.status") {
+    detail.textContent = ` ${friendlyStatusLabel(payload.status)}`;
+  } else if (obj.type === "tool.requested") {
+    const toolLabel = friendlyToolName(payload.tool_name);
+    const toolDetail = friendlyToolDetail(payload.tool_name, payload.args);
+    detail.textContent = ` ${toolLabel}${toolDetail}`;
+  } else if (obj.type === "tool.result") {
+    const summary = friendlyResultSummary(payload.tool_name, payload.result);
+    detail.textContent = ` ${summary}`;
+  } else if (obj.type === "approval.requested") {
+    const risk = payload.risk ? `[${payload.risk}] ` : "";
+    detail.textContent = ` ${risk}${payload.summary || payload.tool_name || ""}`;
+  } else if (obj.type === "approval.resolved") {
+    detail.textContent = ` ${payload.decision === "approve" ? "Approved" : "Denied"}`;
+  } else if (obj.type === "error") {
+    detail.textContent = ` ${payload.message || "An error occurred"}`;
   } else {
     detail.textContent = ` ${JSON.stringify(payload).slice(0, 200)}`;
   }
@@ -120,7 +245,61 @@ const approvalsById = new Map();
 let recorder = null;
 let chunks = [];
 let streamingNode = null;
+let streamingContainer = null;
+let streamingCombinedRaw = "";
 let isRunning = false;
+
+function getActiveTask() {
+  return tasks.find((t) => t.id === activeTaskId) || null;
+}
+
+function getTaskByRunId(runId) {
+  if (!runId) return null;
+  return tasks.find((t) => (t && (t.runId === runId || t.run_id === runId))) || null;
+}
+
+function getRunIdFromMessage(msg) {
+  if (!msg) return null;
+  const p = msg.payload || {};
+  return p.run_id || p.runId || null;
+}
+
+function persistTask(task) {
+  if (!task) return;
+  try { saveTasks(); } catch {}
+}
+
+function restoreTaskStatus() {
+  const task = getActiveTask();
+  const s = (task && task.runStatus) ? String(task.runStatus) : "idle";
+
+  // Keep the status line scoped to the open chat.
+  statusLine.classList.toggle("failed", s === "failed");
+
+  if (s === "running" || s === "starting" || s === "queued" || s === "awaiting_approval") {
+    setStatus(`${s.charAt(0).toUpperCase() + s.slice(1)}`, true, { showStop: true });
+    return;
+  }
+  if (s === "succeeded") {
+    setStatus("Succeeded", false, { showStop: false });
+    return;
+  }
+  if (s === "failed") {
+    setStatus("Failed", false, { showStop: false });
+    return;
+  }
+  if (s === "canceled") {
+    setStatus("Canceled", false, { showStop: false });
+    return;
+  }
+  setStatus("Idle", false, { showStop: false });
+}
+
+function resetStreamingState() {
+  streamingNode = null;
+  streamingContainer = null;
+  streamingCombinedRaw = "";
+}
 
 function updateEmptyState() {
   if (!mainChat || !chatLog) return;
@@ -438,21 +617,64 @@ function appendChat(role, text) {
   return bodyEl;
 }
 
-function appendApprovalMessage(payload) {
-  if (!chatLog || !payload) return;
+function ensureStreamingAssistantContainer() {
+  if (streamingContainer) return streamingContainer;
+  if (!chatLog) return null;
+
   const div = document.createElement("div");
-  div.className = "msg msg--assistant msg--approval";
+  div.className = "msg msg--assistant";
 
   const roleEl = document.createElement("div");
   roleEl.className = "msgRole";
-  roleEl.textContent = "Approval";
+  roleEl.textContent = "Marvin";
 
   const bodyEl = document.createElement("div");
-  bodyEl.className = "msgBody";
+  bodyEl.className = "msgBody msgBody--stack";
+  bodyEl.dataset.raw = "";
+
+  div.appendChild(roleEl);
+  div.appendChild(bodyEl);
+  chatLog.appendChild(div);
+  scrollChatToBottom({ force: true });
+  updateEmptyState();
+
+  streamingContainer = bodyEl;
+  return bodyEl;
+}
+
+function appendStreamingMarkdownPart(initialText = "") {
+  const container = ensureStreamingAssistantContainer();
+  if (!container) return null;
+
+  const part = document.createElement("div");
+  part.className = "msgPart msgPart--markdown";
+  part.dataset.raw = initialText || "";
+  part.innerHTML = renderMarkdown(initialText || "");
+  postProcessMarkdown(part);
+  container.appendChild(part);
+  scrollChatToBottom({ force: true });
+  return part;
+}
+
+function appendApprovalInline(payload) {
+  if (!payload) return;
+
+  const container = ensureStreamingAssistantContainer();
+  if (!container) return;
+
+  const card = document.createElement("div");
+  card.className = "approvalCard";
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "approval-title";
+  titleEl.textContent = "Approval";
+
+  const summaryEl = document.createElement("div");
+  summaryEl.className = "approval-summary";
   const summaryText = `[${payload.risk}] ${payload.tool_name}\n\n${payload.summary || ""}`.trim();
-  bodyEl.dataset.raw = summaryText;
-  bodyEl.innerHTML = renderMarkdown(summaryText);
-  postProcessMarkdown(bodyEl);
+  summaryEl.dataset.raw = summaryText;
+  summaryEl.innerHTML = renderMarkdown(summaryText);
+  postProcessMarkdown(summaryEl);
 
   const statusEl = document.createElement("div");
   statusEl.className = "approval-status";
@@ -474,15 +696,21 @@ function appendApprovalMessage(payload) {
   actionsEl.appendChild(denyBtn);
   actionsEl.appendChild(approveBtn);
 
-  div.appendChild(roleEl);
-  div.appendChild(bodyEl);
-  div.appendChild(statusEl);
-  div.appendChild(actionsEl);
-  chatLog.appendChild(div);
+  card.appendChild(titleEl);
+  card.appendChild(summaryEl);
+  card.appendChild(statusEl);
+  card.appendChild(actionsEl);
+
+  container.appendChild(card);
   scrollChatToBottom({ force: true });
-  updateEmptyState();
 
   approvalsById.set(payload.tool_call_id, { statusEl, actionsEl });
+}
+
+function splitStreamingAfterApproval() {
+  // After an approval card is inserted, continue streaming in a new markdown part
+  // so new assistant output appears after the approval.
+  streamingNode = appendStreamingMarkdownPart("");
 }
 
 function appendEvent(obj) {
@@ -494,12 +722,16 @@ function appendEvent(obj) {
   // Stamp a client-side timestamp for per-chat restore.
   if (obj.__ts == null) obj.__ts = Date.now();
 
-  const task = tasks.find((t) => t.id === activeTaskId);
-  if (task) {
-    task.events = Array.isArray(task.events) ? task.events : [];
-    task.events.push(obj);
-    try { saveTasks(); } catch {}
+  const runId = getRunIdFromMessage(obj);
+  const targetTask = getTaskByRunId(runId) || getActiveTask();
+  if (targetTask) {
+    targetTask.events = Array.isArray(targetTask.events) ? targetTask.events : [];
+    targetTask.events.push(obj);
+    persistTask(targetTask);
   }
+
+  // Only render into the inspector for the currently open chat.
+  if (!targetTask || targetTask.id !== activeTaskId) return;
 
   const line = renderEventLine(obj);
   if (!line) return;
@@ -533,6 +765,7 @@ function setStatus(text, running, { showStop = true } = {}) {
 }
 
 async function startRun(text) {
+  resetStreamingState();
   appendChat("user", text);
   setStatus("Starting...", true, { showStop: true });
   const res = await fetch("/runs", {
@@ -547,11 +780,19 @@ async function startRun(text) {
   });
   const body = await res.json();
   currentRunId = body.run_id;
+  const task = getActiveTask();
+  if (task) {
+    task.runId = currentRunId;
+    task.runStatus = "starting";
+    persistTask(task);
+  }
 }
 
 async function cancelRun() {
-  if (!currentRunId) return;
-  await fetch(`/runs/${currentRunId}/cancel`, { method: "POST" });
+  const task = getActiveTask();
+  const runId = (task && task.runId) ? task.runId : currentRunId;
+  if (!runId) return;
+  await fetch(`/runs/${runId}/cancel`, { method: "POST" });
 }
 
 function showApprovalModal(summary) {
@@ -607,9 +848,11 @@ function setApprovalMessageState(toolCallId, state) {
 }
 
 async function resolveApproval(decision, toolCallId) {
-  if (!toolCallId || !currentRunId) return;
+  const task = getActiveTask();
+  const runId = (task && task.runId) ? task.runId : currentRunId;
+  if (!toolCallId || !runId) return;
   setApprovalMessageState(toolCallId, decision === "approve" ? "Approved" : "Denied");
-  await fetch(`/runs/${currentRunId}/approval`, {
+  await fetch(`/runs/${runId}/approval`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tool_call_id: toolCallId, decision }),
@@ -876,52 +1119,97 @@ const wsProto = location.protocol === "https:" ? "wss" : "ws";
 const ws = new WebSocket(`${wsProto}://${location.host}/ws?session_id=${encodeURIComponent(sessionId)}`);
 ws.onmessage = (evt) => {
   const msg = JSON.parse(evt.data);
+  // Always persist the event to the chat/run it belongs to.
   appendEvent(msg);
   const { type, payload } = msg;
+  const msgRunId = getRunIdFromMessage(msg);
+  const msgTask = getTaskByRunId(msgRunId) || getActiveTask();
+  const isForActiveChat = !!(msgTask && msgTask.id === activeTaskId);
   if (type === "run.status") {
     const s = payload.status;
-    setStatus(
-      `${s.charAt(0).toUpperCase() + s.slice(1)}`,
-      s === "running" || s === "starting",
-      { showStop: true }
-    );
+    if (msgTask) {
+      msgTask.runStatus = s;
+      persistTask(msgTask);
+    }
+    // Status line should reflect only the currently open chat.
+    if (isForActiveChat) {
+      statusLine.classList.toggle("failed", s === "failed");
+      setStatus(
+        `${s.charAt(0).toUpperCase() + s.slice(1)}`,
+        s === "running" || s === "starting" || s === "queued" || s === "awaiting_approval",
+        { showStop: true }
+      );
+    }
     if (s === "succeeded" || s === "failed" || s === "canceled") {
-      stopBtn.classList.remove("visible");
-      // Persist the latest chat messages if the user switches chats right after a run.
-      try { saveCurrentChat(); } catch {}
-      if (payload.run_id === currentRunId) {
-        const label = s.charAt(0).toUpperCase() + s.slice(1);
-        appendChat("system", `Run ${label}.`);
+      if (isForActiveChat) {
+        stopBtn.classList.remove("visible");
+        // Persist the latest chat messages if the user switches chats right after a run.
+        try { saveCurrentChat(); } catch {}
+        if (payload.run_id === currentRunId) {
+          const label = s.charAt(0).toUpperCase() + s.slice(1);
+          appendChat("system", `Run ${label}.`);
+        }
+        // If a run ended unexpectedly (failed/canceled), ensure we don't keep appending
+        // into an old streaming node.
+        resetStreamingState();
       }
     }
   }
   if (type === "assistant.final") {
+    if (!isForActiveChat) {
+      // Chat is not open; keep a minimal history by appending the final assistant text.
+      if (msgTask) {
+        msgTask.messages = Array.isArray(msgTask.messages) ? msgTask.messages : [];
+        msgTask.messages.push({ role: "assistant", text: payload.text || "" });
+        persistTask(msgTask);
+      }
+      return;
+    }
     const finalText = payload.text || "";
     if (streamingNode) {
+      // Final text corresponds to the current (last) part; don't wipe earlier parts.
       streamingNode.dataset.raw = finalText;
       streamingNode.innerHTML = renderMarkdown(finalText);
       postProcessMarkdown(streamingNode);
-      streamingNode = null;
+      if (streamingContainer) streamingContainer.dataset.raw = (streamingContainer.dataset.raw || streamingCombinedRaw || "");
       scrollChatToBottom({ force: true });
+      resetStreamingState();
+    } else if (streamingContainer) {
+      // We have a container but no part (edge case). Create the part and finalize it.
+      streamingNode = appendStreamingMarkdownPart(finalText);
+      scrollChatToBottom({ force: true });
+      resetStreamingState();
     } else {
       appendChat("assistant", finalText);
+      resetStreamingState();
     }
     try { saveCurrentChat(); } catch {}
   }
   if (type === "assistant.delta") {
-    if (!streamingNode) {
-      streamingNode = appendChat("assistant", "");
-    }
-    const next = (streamingNode.dataset.raw || "") + (payload.text || "");
+    if (!isForActiveChat) return;
+    if (!streamingContainer) ensureStreamingAssistantContainer();
+    if (!streamingNode) streamingNode = appendStreamingMarkdownPart("");
+    const deltaText = payload.text || "";
+    const next = (streamingNode.dataset.raw || "") + deltaText;
     streamingNode.dataset.raw = next;
     streamingNode.innerHTML = renderMarkdown(next);
     postProcessMarkdown(streamingNode);
+
+    streamingCombinedRaw += deltaText;
+    if (streamingContainer) streamingContainer.dataset.raw = streamingCombinedRaw;
     scrollChatToBottom({ force: false });
   }
   if (type === "approval.requested") {
-    appendApprovalMessage(payload);
+    if (!isForActiveChat) return;
+    // Ensure any in-progress assistant text stays above the approval,
+    // then continue streaming after it.
+    if (!streamingContainer) ensureStreamingAssistantContainer();
+    if (!streamingNode) streamingNode = appendStreamingMarkdownPart("");
+    appendApprovalInline(payload);
+    splitStreamingAfterApproval();
   }
   if (type === "approval.resolved") {
+    if (!isForActiveChat) return;
     setApprovalMessageState(payload.tool_call_id, payload.decision === "approve" ? "Approved" : "Denied");
   }
 };
@@ -1238,6 +1526,9 @@ function loadTasks() {
   tasks.forEach((t) => {
     if (!Array.isArray(t.messages)) t.messages = [];
     if (!Array.isArray(t.events)) t.events = [];
+    if (t.runId == null && t.run_id != null) t.runId = t.run_id;
+    if (t.runId == null) t.runId = null;
+    if (t.runStatus == null) t.runStatus = null;
   });
   if (!tasks.length) {
     createTask("New Task");
@@ -1253,13 +1544,14 @@ function createTask(name) {
   // Persist the currently active chat before switching to a new one.
   // Otherwise, the DOM gets cleared and history appears lost when returning.
   saveCurrentChat();
-  const task = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: name || "New Task", messages: [], events: [] };
+  const task = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: name || "New Task", messages: [], events: [], runId: null, runStatus: null };
   tasks.unshift(task);
   activeTaskId = task.id;
   saveTasks();
   renderTasks();
   chatLog.innerHTML = "";
   restoreTaskEvents();
+  restoreTaskStatus();
   const presets = document.getElementById("presets");
   if (presets) presets.style.display = "";
   updateEmptyState();
@@ -1275,6 +1567,9 @@ function deleteTask(id) {
       renderTasks();
       restoreTaskChat();
       restoreTaskEvents();
+      const t = getActiveTask();
+      currentRunId = (t && t.runId) ? t.runId : null;
+      restoreTaskStatus();
       return;
     }
   }
@@ -1288,6 +1583,9 @@ function switchTask(id) {
   activeTaskId = id;
   restoreTaskChat();
   restoreTaskEvents();
+  const t = getActiveTask();
+  currentRunId = (t && t.runId) ? t.runId : null;
+  restoreTaskStatus();
   renderTasks();
 }
 

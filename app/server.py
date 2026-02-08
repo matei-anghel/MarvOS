@@ -72,8 +72,8 @@ def _hands_from_env() -> Hands:
         if os.name == "nt":
             try:
                 return WindowsUseHands()
-            except Exception:
-                return StubHands()
+            except Exception as e:
+                return StubHands(note=f"StubHands in use; WindowsUseHands failed to start: {e}")
         return StubHands()
     return StubHands()
 
