@@ -44,17 +44,61 @@ class RunManager:
         self._runs: dict[str, _RunRuntime] = {}
         self._lock = asyncio.Lock()
 
-    async def start_run(self, *, session_id: str, input_text: str, mode: str, options: dict[str, Any]) -> str:
+    async def start_run(
+        self,
+        *,
+        session_id: str,
+        input_text: str,
+        mode: str,
+        options: dict[str, Any],
+        history_messages: list[dict[str, Any]] | None = None,
+    ) -> str:
         run_id = uuid.uuid4().hex
         parsed_options = RunOptions(**options) if not isinstance(options, RunOptions) else options
         prompts = build_prompts(self._tools)
         system_msg = f"{prompts.system}\n\n{prompts.developer}"
         print(f"[RUNNER DEBUG] System message length: {len(system_msg)} chars")
         print(f"[RUNNER DEBUG] User input: {input_text}")
-        message_history: list[dict[str, Any]] = [
-            to_message("system", system_msg),
-            to_message("user", input_text),
-        ]
+        message_history: list[dict[str, Any]] = [to_message("system", system_msg)]
+
+        # If the UI provided prior chat history, include it so each run continues the conversation.
+        for msg in (history_messages or []):
+            try:
+                role = str(msg.get("role") or "").strip().lower()
+                if role not in {"user", "assistant"}:
+                    continue
+                content = msg.get("content")
+                if content is None:
+                    content = msg.get("text")
+                content_str = str(content or "")
+                if not content_str.strip():
+                    continue
+                message_history.append(to_message(role, content_str))
+            except Exception:
+                continue
+
+        # If a plan already exists in history, add a system reminder to avoid re-asking questions.
+        if history_messages:
+            plan_markers = (
+                "here's a structured plan",
+                "here is a structured plan",
+                "trip overview",
+                "step-by-step plan",
+                "next steps",
+                "i've generated a plan",
+                "generated a plan",
+            )
+            history_text = "\n".join(str(m.get("content") or m.get("text") or "") for m in history_messages)
+            if any(p in history_text.lower() for p in plan_markers):
+                message_history.append(
+                    to_message(
+                        "system",
+                        "A plan was already generated earlier in this conversation. Do NOT call research.ask_clarifying_questions again. "
+                        "If the user requests execution, proceed to research.execute_plan_with_hands or ask ONLY the minimum execution-critical details.",
+                    )
+                )
+
+        message_history.append(to_message("user", input_text))
 
         await asyncio.to_thread(self._storage.create_run, run_id=run_id, session_id=session_id, input_text=input_text,
                                 status=RunStatus.queued.value, options=parsed_options.model_dump(), message_history=message_history)
@@ -252,7 +296,7 @@ class RunManager:
             # Clean up malformed tool names - extract just the tool name without arguments
             # Handle cases like: "hands.observe({\"include_screenshot\": true}) garbage"
             import re
-            valid_tool_pattern = r'^(hands\.observe|hands\.act|shell\.exec_powershell|fs\.list|fs\.mkdir|fs\.move|fs\.rename|fs\.delete|vision\.inspect_screenshot|mistral_agents\.create|mistral_agents\.chat|dictation\.transcribe|user\.confirm)'
+            valid_tool_pattern = r'^(hands\.observe|hands\.act|shell\.exec_powershell|fs\.list|fs\.mkdir|fs\.move|fs\.rename|fs\.delete|fs\.find_large|vision\.inspect_screenshot|mistral_agents\.create|mistral_agents\.chat|dictation\.transcribe|user\.confirm|research\.search_agents|research\.setup_agent|research\.ask_clarifying_questions|research\.generate_plan|research\.execute_step|research\.execute_plan_with_hands|web\.browse)'
             match = re.match(valid_tool_pattern, raw_tool_name)
             if match:
                 tool_name = match.group(1)
@@ -315,6 +359,39 @@ class RunManager:
             if tool_def is None:
                 result = {"ok": False, "error": f"Unknown tool: {tool_name}"}
             else:
+                # Hard block: if a plan already exists, do not allow asking clarifying questions again.
+                if tool_name == "research.ask_clarifying_questions":
+                    history_text = "\n".join(str(m.get("content") or "") for m in message_history)
+                    plan_markers = (
+                        "here's a structured plan",
+                        "here is a structured plan",
+                        "trip overview",
+                        "step-by-step plan",
+                        "next steps",
+                        "i've generated a plan",
+                        "generated a plan",
+                    )
+                    if any(p in history_text.lower() for p in plan_markers):
+                        result = {
+                            "ok": True,
+                            "data": {
+                                "questions": [],
+                                "skipped": True,
+                                "reason": "Plan already exists in history; skip clarifying questions.",
+                            },
+                        }
+                        message_history.append(tool_result_message(tool_name=tool_name, tool_call_id=tool_call_id, result=result))
+                        await asyncio.to_thread(self._storage.update_run, run_id=run_id, message_history=message_history)
+                        await self._hub.publish(
+                            session_id,
+                            run_id,
+                            Event(
+                                "tool.result",
+                                {"run_id": run_id, "tool_call_id": tool_call_id, "tool_name": tool_name, "result": result},
+                            ),
+                        )
+                        continue
+
                 if tool_def.requires_approval_for_args(args) and not (options.auto_approve_medium and tool_def.risk == "MEDIUM"):
                     await self._hub.publish(
                         session_id,
@@ -371,3 +448,4 @@ class RunManager:
                     {"run_id": run_id, "tool_call_id": tool_call_id, "tool_name": tool_name, "result": result},
                 ),
             )
+

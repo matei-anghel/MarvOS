@@ -74,17 +74,11 @@ class WindowApi:
             return {"ok": False}
         w = self._window
 
-        try:
-            x, y = w.get_position()
-        except Exception:
-            x = int(getattr(w, "x", 0) or 0)
-            y = int(getattr(w, "y", 0) or 0)
-
-        try:
-            width, height = w.get_size()
-        except Exception:
-            width = int(getattr(w, "width", 0) or 0)
-            height = int(getattr(w, "height", 0) or 0)
+        # Use getattr with fallbacks - get_position/get_size may not exist on all platforms
+        x = int(getattr(w, "x", 0) or 0)
+        y = int(getattr(w, "y", 0) or 0)
+        width = int(getattr(w, "width", 0) or 0)
+        height = int(getattr(w, "height", 0) or 0)
 
         return {
             "ok": True,
@@ -146,6 +140,8 @@ def main() -> None:
         window_kwargs["icon"] = icon_path
 
     window = webview.create_window("MarvOS", url, **window_kwargs)
+    if window is None:
+        raise RuntimeError("Failed to create webview window")
     api.set_window(window)
     webview.start()
 

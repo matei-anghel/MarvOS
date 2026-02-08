@@ -283,7 +283,7 @@ class WindowsMCPHands(Hands):
         walk(root, max_depth)
         return elements
 
-    def _get_annotated_screenshot(self, elements: list[dict]) -> str:
+    def _get_annotated_screenshot(self, elements: list[dict]) -> str | None:
         """Capture screenshot with element annotations."""
         try:
             from PIL import Image, ImageDraw, ImageFont
@@ -413,6 +413,9 @@ class WindowsMCPHands(Hands):
             x, y = int(action["x"]), int(action["y"])
         elif "name" in action or "query" in action:
             query = action.get("name") or action.get("query")
+            if not query:
+                return {"type": "click", "ok": False, 
+                       "error": "Click by name/query requires a valid name or query"}
             root = self._auto.GetForegroundControl()
             if root:
                 elements = self._get_interactive_elements(root, "")
@@ -441,7 +444,12 @@ class WindowsMCPHands(Hands):
                "button": button, "clicks": clicks}
 
     def _handle_type(self, action: dict[str, Any]) -> dict[str, Any]:
-        """Handle type action."""
+        """Handle type action.
+
+        Uses clipboard-paste (Ctrl+V) for reliability on modern web forms with
+        autocomplete/autosuggest.  Falls back to pyautogui.typewrite() only when
+        the clipboard approach fails.
+        """
         text = str(action.get("text", ""))
         clear = action.get("clear", False)
         press_enter = action.get("submit", False) or action.get("press_enter", False)
@@ -461,11 +469,28 @@ class WindowsMCPHands(Hands):
                            "error": f"Element label {label} not found"}
         elif "x" in action and "y" in action:
             x, y = int(action["x"]), int(action["y"])
+        elif "name" in action or "query" in action:
+            # Resolve by name/query just like click does.
+            query = action.get("name") or action.get("query")
+            if query:
+                root = self._auto.GetForegroundControl()
+                if root:
+                    elements = self._get_interactive_elements(root, "")
+                    best_match = None
+                    best_score = 0
+                    for elem in elements:
+                        from fuzzywuzzy import fuzz
+                        score = fuzz.partial_ratio(query.lower(), elem.name.lower())
+                        if score > best_score and score > 60:
+                            best_score = score
+                            best_match = elem
+                    if best_match:
+                        x, y = best_match.center.x, best_match.center.y
         
         # Click to focus if coordinates provided
         if x is not None and y is not None:
             self._pyautogui.click(x, y)
-            time.sleep(0.1)
+            time.sleep(0.15)
         
         # Handle caret position
         if caret_position == "start":
@@ -479,8 +504,11 @@ class WindowsMCPHands(Hands):
             self._pyautogui.press("backspace")
             time.sleep(0.1)
         
-        # Type text
-        self._pyautogui.typewrite(text, interval=0.01)
+        # Type text via clipboard-paste for reliability (handles autocomplete, non-ASCII, speed).
+        self._clipboard_type(text)
+        
+        # Small pause so autocomplete UIs have time to react.
+        time.sleep(0.15)
         
         # Press enter if requested
         if press_enter:
@@ -488,6 +516,38 @@ class WindowsMCPHands(Hands):
         
         return {"type": "type", "ok": True, "text": text, "coordinates": [x, y] if x else None,
                "clear": clear, "press_enter": press_enter}
+
+    def _clipboard_type(self, text: str) -> None:
+        """Type text by pasting from the clipboard.  Much more reliable than
+        character-by-character typewrite on web forms with autocomplete."""
+        import ctypes
+        try:
+            # Save current clipboard.
+            self._pyautogui.hotkey("ctrl", "c")  # no-op copy to warm clipboard
+            time.sleep(0.05)
+
+            # Put text on the clipboard via win32.
+            CF_UNICODETEXT = 13
+            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+
+            user32.OpenClipboard(0)
+            user32.EmptyClipboard()
+            # Encode to UTF-16LE with null terminator.
+            data = text.encode("utf-16le") + b"\x00\x00"
+            h_mem = kernel32.GlobalAlloc(0x0042, len(data))  # GMEM_MOVEABLE | GMEM_ZEROINIT
+            ptr = kernel32.GlobalLock(h_mem)
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(h_mem)
+            user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+            user32.CloseClipboard()
+
+            # Paste.
+            self._pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.1)
+        except Exception:
+            # Fallback to typewrite (ASCII only, slower).
+            self._pyautogui.typewrite(text, interval=0.02)
 
     def _handle_scroll(self, action: dict[str, Any]) -> dict[str, Any]:
         """Handle scroll action."""
@@ -557,26 +617,95 @@ class WindowsMCPHands(Hands):
         
         return self._handle_shortcut({"shortcut": shortcut})
 
+    def _force_foreground(self, hwnd: int) -> bool:
+        """Reliably bring a window to the foreground, bypassing Windows focus-stealing prevention."""
+        import ctypes
+        try:
+            if self._win32gui.IsIconic(hwnd):
+                self._win32gui.ShowWindow(hwnd, 9)  # SW_RESTORE
+            # The Alt-key trick: press and release Alt so Windows thinks we are
+            # responding to user input, which allows SetForegroundWindow to succeed.
+            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)        # Alt down
+            ctypes.windll.user32.keybd_event(0x12, 0, 0x0002, 0)   # Alt up
+            result = ctypes.windll.user32.SetForegroundWindow(hwnd)
+            return bool(result)
+        except Exception:
+            return False
+
     def _handle_launch(self, action: dict[str, Any]) -> dict[str, Any]:
-        """Handle app launch."""
+        """Handle app launch, wait for its window to appear, and reliably focus it."""
         app_name = action.get("app", "")
-        
-        # Try to launch via Start Menu
+        cwd = action.get("cwd")  # optional working directory
+
+        # If the app is Windows Terminal, force a NEW window (not a tab) and
+        # optionally start in a specific directory.
+        effective_cmd = app_name
+        if app_name.strip().lower() in ("wt", "wt.exe", "windows terminal"):
+            if cwd:
+                effective_cmd = f'wt.exe -w new -d "{cwd}"'
+            else:
+                effective_cmd = "wt.exe -w new"
+
+        # Snapshot window handles before launch
+        before_hwnds: set[int] = set()
         try:
-            result = self._launch_from_start_menu(app_name)
-            if result:
-                return {"type": "launch", "ok": True, "app": app_name, "result": result}
-        except Exception as e:
+            def _collect_before(hwnd, _):
+                if self._win32gui.IsWindowVisible(hwnd) and self._win32gui.GetWindowText(hwnd):
+                    before_hwnds.add(hwnd)
+            self._win32gui.EnumWindows(_collect_before, None)
+        except Exception:
             pass
-        
-        # Fallback: try direct launch
+
+        # Launch the process
         try:
-            subprocess.Popen(app_name, shell=True)
-            return {"type": "launch", "ok": True, "app": app_name, 
-                   "result": f"Launched {app_name}"}
+            subprocess.Popen(effective_cmd, shell=True)
         except Exception as e:
-            return {"type": "launch", "ok": False, "app": app_name, 
-                   "error": str(e)}
+            return {"type": "launch", "ok": False, "app": app_name, "error": str(e)}
+
+        # Wait for a new window to appear (up to 5 s)
+        new_hwnd = None
+        for _ in range(25):  # 25 × 0.2 s = 5 s
+            time.sleep(0.2)
+            try:
+                candidates: list[int] = []
+                def _collect_after(hwnd, _):
+                    if self._win32gui.IsWindowVisible(hwnd) and self._win32gui.GetWindowText(hwnd):
+                        if hwnd not in before_hwnds:
+                            candidates.append(hwnd)
+                self._win32gui.EnumWindows(_collect_after, None)
+                if candidates:
+                    new_hwnd = candidates[0]
+                    break
+            except Exception:
+                pass
+
+        # If we didn't detect a brand-new hwnd (e.g. WT reused a process),
+        # find the most recently-activated terminal-looking window.
+        if new_hwnd is None:
+            try:
+                terminal_keywords = ("powershell", "cmd", "terminal", "windows terminal", "pwsh")
+                all_windows = self._get_windows_list()
+                for w in all_windows:
+                    if any(kw in w["name"].lower() for kw in terminal_keywords):
+                        new_hwnd = w["handle"]
+                        break
+            except Exception:
+                pass
+
+        if new_hwnd:
+            self._force_foreground(new_hwnd)
+            time.sleep(0.3)
+            title = ""
+            try:
+                title = self._win32gui.GetWindowText(new_hwnd)
+            except Exception:
+                pass
+            return {"type": "launch", "ok": True, "app": app_name,
+                    "result": f"Launched and focused: {title}",
+                    "focused_window": title}
+
+        return {"type": "launch", "ok": True, "app": app_name,
+                "result": f"Launched {app_name} (could not confirm new window)"}
 
     def _handle_app(self, action: dict[str, Any]) -> dict[str, Any]:
         """Handle app management."""

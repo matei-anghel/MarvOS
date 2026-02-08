@@ -52,9 +52,9 @@ class MistralGateway:
         client = self._require_client()
         resp = await client.chat.complete_async(
             model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice,
+            messages=messages,  # type: ignore
+            tools=tools,  # type: ignore
+            tool_choice=tool_choice,  # type: ignore
             parallel_tool_calls=parallel_tool_calls,
         )
         msg = resp.choices[0].message
@@ -97,9 +97,9 @@ class MistralGateway:
         # Use async streaming if available in the SDK version
         stream = await client.chat.stream_async(
             model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice=tool_choice_param,
+            messages=messages,  # type: ignore
+            tools=tools,  # type: ignore
+            tool_choice=tool_choice_param,  # type: ignore
         )
         async for chunk in stream:
             delta = chunk.data.choices[0].delta
@@ -126,7 +126,7 @@ class MistralGateway:
         ]
 
         client = self._require_client()
-        resp = await client.chat.complete_async(model=model, messages=messages)
+        resp = await client.chat.complete_async(model=model, messages=messages)  # type: ignore
         msg = resp.choices[0].message
         return {"text": getattr(msg, "content", "")}
 
@@ -231,7 +231,8 @@ class MistralGateway:
 
         def _call_append() -> Any:
             client = self._require_client()
-            return client.beta.conversations.append(conversation_id=conversation_id, inputs=message)
+            assert conversation_id is not None, "conversation_id must not be None for append"
+            return client.beta.conversations.append(conversation_id=conversation_id, inputs=message)  # type: ignore
 
         resp = await asyncio.to_thread(_call_append if conversation_id else _call_start)
         conv_id = str(getattr(resp, "conversation_id", None) or getattr(resp, "id", None) or "")
@@ -243,3 +244,85 @@ class MistralGateway:
             reply_text = str(getattr(last, "content", None) or getattr(last, "text", None) or last)
 
         return AgentChatResult(agent_id=agent_id, conversation_id=conv_id, reply_text=reply_text)
+
+    async def list_cloud_agents(self) -> list[dict[str, Any]]:
+        """List all available Mistral cloud agents."""
+        def _call() -> Any:
+            client = self._require_client()
+            return client.beta.agents.list()
+
+        resp = await asyncio.to_thread(_call)
+        agents = getattr(resp, "data", []) or []
+        return [
+            {
+                "id": str(getattr(agent, "id", "")),
+                "name": str(getattr(agent, "name", "")),
+                "description": str(getattr(agent, "description", "")),
+                "model": str(getattr(agent, "model", "")),
+                "created_at": str(getattr(agent, "created_at", "")),
+            }
+            for agent in agents
+        ]
+
+    async def create_cloud_agent_with_capabilities(
+        self,
+        *,
+        name: str,
+        description: str,
+        instructions: str,
+        model: str = "mistral-large-latest",
+        max_tokens: int = 4096,
+        capabilities: list[str] | None = None,
+    ) -> str:
+        """Create a Mistral cloud agent with specific capabilities (image, search, code).
+        
+        Args:
+            name: Agent name
+            description: Short description
+            instructions: System instructions for the agent
+            model: Model to use (default: mistral-large-latest)
+            max_tokens: Maximum tokens per response
+            capabilities: List of capabilities - "image", "search", "code"
+        """
+        capabilities = capabilities or []
+        
+        def _call() -> Any:
+            client = self._require_client()
+            
+            # Build capability configuration
+            tool_configs = []
+            
+            if "search" in capabilities:
+                tool_configs.append({
+                    "type": "web_search",
+                    "web_search": {
+                        "enabled": True,
+                        "description": "Search the web for current information"
+                    }
+                })
+            
+            if "code" in capabilities:
+                tool_configs.append({
+                    "type": "code_interpreter",
+                    "code_interpreter": {
+                        "enabled": True,
+                        "description": "Execute code and perform calculations"
+                    }
+                })
+            
+            # Build the agent creation payload
+            # Note: max_tokens is not supported by the Mistral agents API
+            payload = {
+                "model": model,
+                "name": name,
+                "description": description,
+                "instructions": instructions,
+            }
+            
+            if tool_configs:
+                payload["tools"] = tool_configs
+            
+            return client.beta.agents.create(**payload)  # type: ignore
+
+        resp = await asyncio.to_thread(_call)
+        return str(getattr(resp, "id"))

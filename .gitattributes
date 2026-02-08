@@ -1,0 +1,7 @@
+# Handle line endings automatically for files detected as text
+# and leave binary files untouched.
+* text=auto
+
+# Optional: Force specific files to use LF or CRLF
+# *.py text eol=lf
+# *.ps1 text eol=crlf

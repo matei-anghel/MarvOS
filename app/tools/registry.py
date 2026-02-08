@@ -56,6 +56,11 @@ class _FsDeleteArgs(BaseModel):
     path: str
 
 
+class _FsFindLargeArgs(BaseModel):
+    path: str = Field(default="C:\\", description="Root path to search from (e.g., '$env:USERPROFILE' for home folder)")
+    count: int = Field(default=10, ge=1, le=50, description="Number of largest files to return")
+
+
 class _VisionInspectArgs(BaseModel):
     artifact_id: str
     prompt: str
@@ -82,6 +87,50 @@ class _DictationTranscribeArgs(BaseModel):
 
 class _UserConfirmArgs(BaseModel):
     prompt: str
+
+
+class _ResearchSearchAgentsArgs(BaseModel):
+    """No arguments needed - lists all available agents."""
+    pass
+
+
+class _ResearchSetupAgentArgs(BaseModel):
+    task_type: str = Field(description="Type of task: trip_planning, product_research, event_planning, or general_research")
+
+
+class _WebBrowseArgs(BaseModel):
+    action: str = Field(description="Action to perform: start, navigate, search, click, type, get_text, screenshot, scroll, get_links, close")
+    url: str | None = Field(default=None, description="URL to navigate to (for navigate action)")
+    query: str | None = Field(default=None, description="Search query (for search action)")
+    selector: str | None = Field(default=None, description="CSS selector for click/type actions")
+    text: str | None = Field(default=None, description="Text to type (for type action)")
+    submit: bool = Field(default=False, description="Whether to press Enter after typing")
+    engine: str = Field(default="google", description="Search engine: google or bing")
+    direction: str = Field(default="down", description="Scroll direction: up or down")
+
+
+class _ResearchAskQuestionsArgs(BaseModel):
+    task_type: str
+    user_input: str
+    agent_id: str | None = None
+
+
+class _ResearchGeneratePlanArgs(BaseModel):
+    task_type: str
+    user_input: str
+    agent_id: str
+    clarifying_answers: dict[str, str] = Field(default_factory=dict)
+
+
+class _ResearchExecuteStepArgs(BaseModel):
+    agent_id: str
+    step_description: str
+    task_type: str
+
+
+class _ResearchExecutePlanWithHandsArgs(BaseModel):
+    plan_steps: list[dict[str, Any]]
+    stop_before_purchase: bool = True
 
 
 ToolHandler = Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]]
@@ -259,6 +308,44 @@ def build_default_registry(
 
         return await delete(args["path"])
 
+    async def fs_find_large(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Find the largest files efficiently using optimized PowerShell."""
+        from app.tools.shell import exec_powershell
+        
+        path = args.get("path", "C:\\")
+        count = args.get("count", 10)
+        
+        # Use direct Get-ChildItem on the specified path with error handling
+        # This is simpler and more reliable than robocopy gymnastics
+        cmd = f'''
+$path = "{path}"
+if (-not (Test-Path $path)) {{
+    Write-Error "Path not found: $path"
+    exit 1
+}}
+
+Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue |
+    Select-Object FullName, Length |
+    Sort-Object Length -Descending |
+    Select-Object -First {count} |
+    ForEach-Object {{
+        $sizeStr = if ($_.Length -ge 1GB) {{ "{{0:N2}} GB" -f ($_.Length / 1GB) }} elseif ($_.Length -ge 1MB) {{ "{{0:N2}} MB" -f ($_.Length / 1MB) }} else {{ "{{0:N2}} KB" -f ($_.Length / 1KB) }}
+        "File: " + $_.FullName + "`nSize: " + $sizeStr + "`n"
+    }}
+'''
+        
+        result = await exec_powershell(
+            command=cmd,
+            cwd=None,
+            timeout_s=120,  # Give it enough time for large directories
+            approved_by_user=True,  # This is a read-only operation
+        )
+        
+        if result["ok"] and result["data"]["stdout"]:
+            return {"ok": True, "data": {"files": result["data"]["stdout"], "path": path}}
+        
+        return {"ok": False, "error": f"Could not find large files in {path}. Error: {result.get('error', 'Unknown error')}"}
+
     async def vision_inspect(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
         artifact = storage.get_artifact(args["artifact_id"])
         if artifact is None:
@@ -306,14 +393,187 @@ def build_default_registry(
         # No-op. Approval is enforced by the runner (this tool is HIGH risk).
         return {"ok": True, "data": {"confirmed": True, "prompt": args["prompt"]}}
 
+    # ── Research workflow tools ─────────────────────────────────────────
+
+    async def research_search_agents(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """List all available Mistral cloud agents."""
+        try:
+            agents = await mistral.list_cloud_agents()
+            return {"ok": True, "data": {"agents": agents, "count": len(agents)}}
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to list agents: {e}"}
+
+    async def research_setup_agent(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Find or create a specialized agent for a task type."""
+        from app.agent.specialized_agent_manager import SpecializedAgentManager
+        
+        manager = SpecializedAgentManager(config=config, mistral=mistral, storage=storage, session_id=session_id)
+        task_type = args.get("task_type", "general_research")
+        
+        try:
+            agent_id, was_created = await manager.find_or_create_agent(task_type)
+            return {
+                "ok": True, 
+                "data": {
+                    "agent_id": agent_id,
+                    "task_type": task_type,
+                    "was_created": was_created,
+                }
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to setup agent: {e}"}
+
+    async def research_ask_questions(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Generate clarifying questions for a task."""
+        from app.agent.specialized_agent_manager import SpecializedAgentManager
+        
+        manager = SpecializedAgentManager(config=config, mistral=mistral, storage=storage, session_id=session_id)
+        task_type = args["task_type"]
+        user_input = args["user_input"]
+        agent_id = args.get("agent_id")
+        
+        if not agent_id:
+            # Try to get or create agent
+            agent_id, _ = await manager.find_or_create_agent(task_type)
+        
+        try:
+            questions, conversation_id = await manager.ask_clarifying_questions(task_type, user_input, agent_id)
+            return {
+                "ok": True,
+                "data": {
+                    "questions": [
+                        {
+                            "question": q.question,
+                            "context": q.context,
+                            "suggested_answers": q.suggested_answers,
+                        }
+                        for q in questions
+                    ],
+                    "agent_id": agent_id,
+                    "conversation_id": conversation_id,
+                }
+            }
+        except Exception as e:
+            # Do not hard-fail the workflow: return fallback questions so the main agent can proceed.
+            fallback = manager._fallback_questions(task_type=task_type, user_input=user_input)
+            return {
+                "ok": True,
+                "data": {
+                    "questions": [
+                        {
+                            "question": q.question,
+                            "context": q.context,
+                            "suggested_answers": q.suggested_answers,
+                        }
+                        for q in fallback
+                    ],
+                    "agent_id": agent_id,
+                    "conversation_id": None,
+                    "warning": f"Failed to generate questions via agent; using fallback. Error: {e}",
+                },
+            }
+
+    async def research_generate_plan(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Generate a research plan based on user input and answers."""
+        from app.agent.specialized_agent_manager import SpecializedAgentManager
+        
+        manager = SpecializedAgentManager(config=config, mistral=mistral, storage=storage, session_id=session_id)
+        task_type = args["task_type"]
+        user_input = args["user_input"]
+        agent_id = args["agent_id"]
+        answers = args.get("clarifying_answers", {})
+        
+        try:
+            plan = await manager.generate_research_plan(task_type, user_input, answers, agent_id)
+            return {
+                "ok": True,
+                "data": {
+                    "plan": {
+                        "task_type": plan.task_type,
+                        "summary": plan.summary,
+                        "steps": plan.steps,
+                        "requirements": plan.requirements,
+                        "estimated_time": plan.estimated_time,
+                        "potential_issues": plan.potential_issues,
+                    },
+                    "agent_id": plan.agent_id,
+                    "conversation_id": plan.conversation_id,
+                }
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to generate plan: {e}"}
+
+    async def research_execute_step(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Execute a single research step."""
+        from app.agent.specialized_agent_manager import SpecializedAgentManager
+        
+        manager = SpecializedAgentManager(config=config, mistral=mistral, storage=storage, session_id=session_id)
+        agent_id = str(args["agent_id"])
+        step_description = str(args["step_description"])
+        task_type = str(args["task_type"])
+        
+        try:
+            result = await manager.execute_research_step(agent_id, step_description, task_type)
+            return {"ok": True, "data": result}
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to execute step: {e}"}
+
+    async def web_browse_handler(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Web browser automation using Playwright."""
+        from app.tools.web_browser import web_browse
+        
+        try:
+            result = await web_browse(
+                action=args["action"],
+                session_id=session_id,
+                url=args.get("url"),
+                query=args.get("query"),
+                selector=args.get("selector"),
+                text=args.get("text"),
+                submit=args.get("submit", False),
+                engine=args.get("engine", "google"),
+                direction=args.get("direction", "down"),
+            )
+            return result
+        except Exception as e:
+            return {"ok": False, "error": f"Web browse failed: {e}"}
+
+    async def research_execute_plan_with_hands(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
+        """Execute an approved plan using Windows automation (hands).
+        
+        This opens applications and websites but stops before any purchase.
+        """
+        # This tool just returns instructions - the actual execution happens through
+        # the normal hands.observe and hands.act tools in subsequent steps
+        plan_steps = args.get("plan_steps", [])
+        stop_before_purchase = args.get("stop_before_purchase", True)
+        
+        # Create a summary of what will be done
+        action_summary = []
+        for step in plan_steps:
+            if isinstance(step, dict):
+                desc = step.get("description", str(step))
+                action_summary.append(desc)
+        
+        return {
+            "ok": True,
+            "data": {
+                "message": f"Plan approved. Will execute {len(action_summary)} steps using Windows automation.",
+                "stop_before_purchase": stop_before_purchase,
+                "steps": action_summary,
+                "next_action": "Use hands.observe and hands.act to execute each step. Stop if a purchase screen is encountered.",
+            }
+        }
+
     tools: dict[str, ToolDef] = {
         "hands.observe": ToolDef(
             name="hands.observe",
             description=(
                 "Observe desktop state via accessibility tree (FAST, no screenshot by default). "
                 "Returns: active window, windows list, and interactive_elements with labels/names/coordinates. "
-                "SCREENSHOT IS OPTIONAL: Use include_screenshot=true ONLY for final verification or when confused. "
-                "The element list alone is sufficient for navigation - element names tell you everything."
+                "NO SCREENSHOT NEEDED for routine tasks - the element list has everything. "
+                "Use include_screenshot=true ONLY for: ambiguous layouts, unfamiliar apps, visual verification. "
+                "For Settings changes and file tasks: use arguments={} (no screenshot)."
             ),
             args_model=_HandsObserveArgs,
             handler=hands_observe,
@@ -380,6 +640,13 @@ def build_default_registry(
             handler=fs_delete,
             risk="HIGH",
         ),
+        "fs.find_large": ToolDef(
+            name="fs.find_large",
+            description="Find the largest files in a directory. Searches recursively and returns the N largest files with their sizes. Use this for finding large files - do NOT use shell.exec_powershell with Get-ChildItem.",
+            args_model=_FsFindLargeArgs,
+            handler=fs_find_large,
+            risk="LOW",
+        ),
         "vision.inspect_screenshot": ToolDef(
             name="vision.inspect_screenshot",
             description="Use a vision model to inspect a screenshot artifact and provide feedback.",
@@ -414,6 +681,64 @@ def build_default_registry(
             args_model=_UserConfirmArgs,
             handler=user_confirm,
             risk="HIGH",
+        ),
+        # Research workflow tools
+        "research.search_agents": ToolDef(
+            name="research.search_agents",
+            description="List all available Mistral cloud agents to check if a specialized agent already exists.",
+            args_model=_ResearchSearchAgentsArgs,
+            handler=research_search_agents,
+            risk="LOW",
+        ),
+        "research.setup_agent": ToolDef(
+            name="research.setup_agent",
+            description="Find or create a specialized agent for a specific task type (trip_planning, product_research, event_planning, general_research). Uses mistral-large-latest with 4096 max_tokens and image/search/code capabilities.",
+            args_model=_ResearchSetupAgentArgs,
+            handler=research_setup_agent,
+            risk="LOW",
+        ),
+        "research.ask_clarifying_questions": ToolDef(
+            name="research.ask_clarifying_questions",
+            description="Generate 2-4 clarifying questions to better understand the user's research/planning task. Returns questions with context and suggested answers.",
+            args_model=_ResearchAskQuestionsArgs,
+            handler=research_ask_questions,
+            risk="LOW",
+        ),
+        "research.generate_plan": ToolDef(
+            name="research.generate_plan",
+            description="Generate a comprehensive research/action plan based on user input and clarifying answers. Returns structured plan with steps, requirements, time estimate, and potential issues.",
+            args_model=_ResearchGeneratePlanArgs,
+            handler=research_generate_plan,
+            risk="LOW",
+        ),
+        "research.execute_step": ToolDef(
+            name="research.execute_step",
+            description="Execute a single research step using the specialized agent (web search, image analysis, calculations).",
+            args_model=_ResearchExecuteStepArgs,
+            handler=research_execute_step,
+            risk="LOW",
+        ),
+        "research.execute_plan_with_hands": ToolDef(
+            name="research.execute_plan_with_hands",
+            description="Begin executing an approved plan using Windows automation (hands.observe and hands.act). Will open apps/websites but ALWAYS stops before any purchase or booking confirmation. Requires user approval for each step.",
+            args_model=_ResearchExecutePlanWithHandsArgs,
+            handler=research_execute_plan_with_hands,
+            risk="HIGH",
+        ),
+        "web.browse": ToolDef(
+            name="web.browse",
+            description=(
+                "Web browser automation using Playwright. "
+                "Actions: start (launch browser), navigate (go to URL), search (Google/Bing), "
+                "click (click element), type (fill input), get_text (extract content), "
+                "screenshot (capture page), scroll (scroll page), get_links (list links), close (quit browser). "
+                "Browser persists per session until closed. "
+                "IMPORTANT: Do NOT attempt to install Playwright browsers or dependencies during a run. "
+                "If this tool fails to start/launch, switch to hands.observe + hands.act in the user's real browser instead."
+            ),
+            args_model=_WebBrowseArgs,
+            handler=web_browse_handler,
+            risk="MEDIUM",
         ),
     }
 

@@ -53,6 +53,8 @@ function summarizeOneLine(text, maxLen = 160) {
   return trimmed.slice(0, Math.max(0, maxLen - 4)).trimEnd() + " ...";
 }
 
+
+
 function friendlyEventType(type) {
   const map = {
     "run.created": "Started",
@@ -601,20 +603,35 @@ function appendChat(role, text) {
   scrollChatToBottom({ force: true });
   updateEmptyState();
 
-  // Hide presets after first user message & auto-name task
+  // Hide presets after first user message
   if (role === "user") {
     const presets = document.getElementById("presets");
     if (presets) presets.style.display = "none";
-    // Auto-name task from first message
-    const task = tasks.find(t => t.id === activeTaskId);
-    if (task && task.name === "New Task" && text) {
-      task.name = text.length > 40 ? text.slice(0, 37) + "…" : text;
-      saveTasks();
-      renderTasks();
-    }
   }
 
   return bodyEl;
+}
+
+function collectChatHistoryFromDom(maxMessages = 24) {
+  if (!chatLog) return [];
+  const msgs = Array.from(chatLog.children)
+    .map((el) => {
+      if (!el || !el.classList) return null;
+      const body = el.querySelector(".msgBody");
+      const raw = (body && body.dataset && body.dataset.raw != null) ? body.dataset.raw : (body ? body.textContent : "");
+      const text = String(raw || "");
+      if (!text.trim()) return null;
+
+      let role = null;
+      if (el.classList.contains("msg--user")) role = "user";
+      else if (el.classList.contains("msg--assistant")) role = "assistant";
+      else return null;
+
+      return { role, text };
+    })
+    .filter(Boolean);
+
+  return msgs.slice(Math.max(0, msgs.length - maxMessages));
 }
 
 function ensureStreamingAssistantContainer() {
@@ -743,10 +760,15 @@ function appendEvent(obj) {
 }
 
 /* ─── Status helper ─── */
+function setRunGlow(active) {
+  document.body.classList.toggle("run-glow", Boolean(active));
+}
+
 function setStatus(text, running, { showStop = true } = {}) {
   const label = statusLine.querySelector(".status-label");
   if (label) label.textContent = text;
   isRunning = running;
+  setRunGlow(running && showStop);
   if (running) {
     statusLine.classList.add("running");
     if (showStop) stopBtn.classList.add("visible");
@@ -766,7 +788,19 @@ function setStatus(text, running, { showStop = true } = {}) {
 
 async function startRun(text) {
   resetStreamingState();
+  // Collect history BEFORE appending the new user message, so we don't duplicate it.
+  const history = collectChatHistoryFromDom(24);
   appendChat("user", text);
+
+  // Update task title from "New Task" on first user message
+  let task = getActiveTask();
+  if (task && task.name === "New Task") {
+    const title = text.slice(0, 40) + (text.length > 40 ? "..." : "");
+    task.name = title;
+    persistTask(task);
+    renderTasks();
+  }
+
   setStatus("Starting...", true, { showStop: true });
   const res = await fetch("/runs", {
     method: "POST",
@@ -775,12 +809,13 @@ async function startRun(text) {
       session_id: sessionId,
       input_text: text,
       mode: "chat",
+      history,
       options: { include_screenshots: true, auto_approve_medium: true },
     }),
   });
   const body = await res.json();
   currentRunId = body.run_id;
-  const task = getActiveTask();
+  task = getActiveTask();
   if (task) {
     task.runId = currentRunId;
     task.runStatus = "starting";
@@ -1145,10 +1180,7 @@ ws.onmessage = (evt) => {
         stopBtn.classList.remove("visible");
         // Persist the latest chat messages if the user switches chats right after a run.
         try { saveCurrentChat(); } catch {}
-        if (payload.run_id === currentRunId) {
-          const label = s.charAt(0).toUpperCase() + s.slice(1);
-          appendChat("system", `Run ${label}.`);
-        }
+        // Status message removed - no longer showing "Run Succeeded" etc in chat
         // If a run ended unexpectedly (failed/canceled), ensure we don't keep appending
         // into an old streaming node.
         resetStreamingState();
@@ -1183,6 +1215,7 @@ ws.onmessage = (evt) => {
       appendChat("assistant", finalText);
       resetStreamingState();
     }
+    
     try { saveCurrentChat(); } catch {}
   }
   if (type === "assistant.delta") {
@@ -1300,6 +1333,8 @@ if (resizeRightHandle) resizeRightHandle.classList.add("hidden");
     titlebarDrag.addEventListener("dblclick", () => callApi("toggle_maximize"));
   }
 })();
+
+
 
 /* ═══════════════════════════════════════════════════
    FRAMELESS WINDOW RESIZE (pywebview)

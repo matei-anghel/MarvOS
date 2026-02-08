@@ -19,6 +19,7 @@ dependencies = [
   "platformdirs>=4.2.0",
   "Pillow>=10.3.0",
   "mistralai[realtime]>=1.0.0",
+  "playwright>=1.41.0",
 ]
 
 [project.optional-dependencies]
@@ -38,3 +39,7 @@ packages = ["app"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

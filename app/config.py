@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass(frozen=True)
@@ -19,4 +20,8 @@ class AppConfig:
     default_audio_model: str = "voxtral-mini-2602"
     max_steps_default: int = 30
     shell_timeout_s: int = 30
+    # Specialized agent configuration for research tasks
+    specialized_agent_model: str = "mistral-large-latest"
+    specialized_agent_max_tokens: int = 4096
+    specialized_agent_capabilities: List[str] = field(default_factory=lambda: ["image", "search", "code"])
 

@@ -27,6 +27,33 @@ from app.storage.paths import ensure_data_dirs
 from app.tools.registry import ToolRegistry, build_default_registry
 
 
+def _normalize_history_messages(raw: Any) -> list[dict[str, str]]:
+    """Normalize UI-provided chat history into OpenAI-style message dicts.
+
+    Expected shape: [{"role":"user"|"assistant", "text":"..."}, ...]
+    Returns: [{"role":"user"|"assistant", "content":"..."}, ...]
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        text = item.get("text")
+        if text is None:
+            text = item.get("content")
+        content = str(text or "")
+        if not content.strip():
+            continue
+        out.append({"role": role, "content": content})
+        if len(out) >= 40:  # hard cap to keep prompts bounded
+            break
+    return out
+
+
 class Services:
     def __init__(
         self,
@@ -208,11 +235,12 @@ def create_app() -> FastAPI:
         input_text = str(body.get("input_text") or "")
         mode = str(body.get("mode") or "chat")
         options = dict(body.get("options") or {})
+        history = _normalize_history_messages(body.get("history") or body.get("history_messages") or [])
 
         services: Services = request.app.state.services
         services.storage.ensure_session(session_id)
         run_id = await services.run_manager.start_run(
-            session_id=session_id, input_text=input_text, mode=mode, options=options
+            session_id=session_id, input_text=input_text, mode=mode, options=options, history_messages=history
         )
         return JSONResponse({"run_id": run_id})
 
