@@ -7,8 +7,8 @@ from dataclasses import dataclass
 class AppConfig:
     app_name: str = "MarvOS Agent"
     api_host: str = "127.0.0.1"
-    default_text_model: str = "labs-mistral-small-creative"
-    default_vision_model: str = "mistral-large-latest"
+    # Unified model for chat, text, and vision (Mistral Large supports both)
+    default_model: str = "mistral-large-latest"
     # Realtime streaming transcription (lowest latency, PCM S16LE 16kHz).
     default_audio_model_realtime: str = "voxtral-mini-transcribe-realtime-2602"
     # File-based transcription fallback (Voxtral Mini Transcribe V2).

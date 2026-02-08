@@ -17,8 +17,8 @@ from app.storage.db import Storage
 
 
 class _HandsObserveArgs(BaseModel):
-    include_screenshot: bool = False
-    ui_tree_depth: int = Field(default=5, ge=0, le=20)
+    include_screenshot: bool = True
+    ui_tree_depth: int = Field(default=10, ge=0, le=20)
 
 
 class _HandsActArgs(BaseModel):
@@ -153,27 +153,36 @@ def build_default_registry(
     artifacts_dir = Path(os.environ.get("MARVOS_DATA_DIR", "")) / "artifacts" if os.environ.get("MARVOS_DATA_DIR") else None
 
     async def hands_observe(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
-        obs = await hands.observe(include_screenshot=args["include_screenshot"], ui_tree_depth=args["ui_tree_depth"])
-        b64 = obs.pop("screenshot_base64_png", None)
-        if b64:
-            artifact_id = uuid.uuid4().hex
-            # Persist artifact to the app's artifacts directory
-            from app.storage.paths import ensure_data_dirs
+        print(f"[REGISTRY DEBUG] hands_observe called with args: {args}")
+        try:
+            obs = await hands.observe(include_screenshot=args["include_screenshot"], ui_tree_depth=args["ui_tree_depth"])
+            print(f"[REGISTRY DEBUG] hands.observe returned: {len(obs.get('interactive_elements', []))} elements, error: {obs.get('error', 'None')}")
+            b64 = obs.pop("screenshot_base64_png", None)
+            if b64:
+                artifact_id = uuid.uuid4().hex
+                # Persist artifact to the app's artifacts directory
+                from app.storage.paths import ensure_data_dirs
 
-            paths = ensure_data_dirs()
-            path = paths["artifacts"] / f"{artifact_id}.png"
-            path.write_bytes(__import__("base64").b64decode(b64))
-            storage.add_artifact(
-                artifact_id=artifact_id,
-                session_id=session_id,
-                run_id=run_id,
-                kind="screenshot",
-                mime="image/png",
-                path=str(path),
-            )
-            await hub.publish(session_id, run_id, Event("artifact.created", {"run_id": run_id, "artifact_id": artifact_id, "kind": "screenshot"}))
-            obs["screenshot_artifact_id"] = artifact_id
-        return {"ok": True, "data": obs}
+                paths = ensure_data_dirs()
+                path = paths["artifacts"] / f"{artifact_id}.png"
+                path.write_bytes(__import__("base64").b64decode(b64))
+                storage.add_artifact(
+                    artifact_id=artifact_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    kind="screenshot",
+                    mime="image/png",
+                    path=str(path),
+                )
+                await hub.publish(session_id, run_id, Event("artifact.created", {"run_id": run_id, "artifact_id": artifact_id, "kind": "screenshot"}))
+                obs["screenshot_artifact_id"] = artifact_id
+            print(f"[REGISTRY DEBUG] hands_observe returning success")
+            return {"ok": True, "data": obs}
+        except Exception as e:
+            print(f"[REGISTRY DEBUG ERROR] hands_observe failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"ok": False, "error": str(e)}
 
     async def hands_act(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
         res = await hands.act(actions=args["actions"])
@@ -219,7 +228,7 @@ def build_default_registry(
         if artifact is None:
             return {"ok": False, "error": "artifact not found"}
         png = Path(artifact.path).read_bytes()
-        res = await mistral.inspect_screenshot(model=config.default_vision_model, screenshot_png_bytes=png, prompt=args["prompt"])
+        res = await mistral.inspect_screenshot(model=config.default_model, screenshot_png_bytes=png, prompt=args["prompt"])
         return {"ok": True, "data": res}
 
     async def agents_create(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
@@ -264,7 +273,13 @@ def build_default_registry(
     tools: dict[str, ToolDef] = {
         "hands.observe": ToolDef(
             name="hands.observe",
-            description="Observe current desktop state (active window, UI tree, optional screenshot).",
+            description=(
+                "Observe current desktop state with ELEMENT LABELING. "
+                "Returns: active window, list of open windows, and interactive_elements list with numbered labels (0, 1, 2...). "
+                "Each element has: label, name, control_type, coordinates [x,y], window name. "
+                "When include_screenshot=true, elements are visually labeled on the screenshot. "
+                "Use these labels in hands.act to precisely target elements."
+            ),
             args_model=_HandsObserveArgs,
             handler=hands_observe,
             risk="LOW",
@@ -272,10 +287,18 @@ def build_default_registry(
         "hands.act": ToolDef(
             name="hands.act",
             description=(
-                "Perform GUI actions. Supported actions (best-effort): "
-                "click: {type:'click',x,y} or {type:'click',path:[...]} or {type:'click',name:'...'}; "
-                "hotkey: {type:'hotkey',keys:[...]} or {type:'hotkey',value:'win+i'}; "
-                "type: {type:'type',text:'...',submit:true|false}; wait/launch/drag_drop are also available."
+                "Perform GUI actions using labeled elements from hands.observe. "
+                "ELEMENT LABELING: Each interactive element has a numbered label (0, 1, 2...) shown on the screenshot. "
+                "Supported actions: "
+                "click by label: {type:'click', element_label:5}; "
+                "click by coordinates: {type:'click', x:100, y:200}; "
+                "click by name: {type:'click', name:'Night light'}; "
+                "type: {type:'type', element_label:3, text:'hello', clear:true, submit:true}; "
+                "scroll: {type:'scroll', element_label:4, direction:'down', wheel_times:3}; "
+                "shortcut: {type:'shortcut', shortcut:'win+i'}; "
+                "hotkey: {type:'hotkey', keys:['ctrl','c']}; "
+                "wait: {type:'wait', ms:800}; "
+                "launch app: {type:'launch', app:'Settings'} or {type:'app', mode:'launch', name:'Notepad'}."
             ),
             args_model=_HandsActArgs,
             handler=hands_act,

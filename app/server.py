@@ -20,7 +20,7 @@ from app.config import AppConfig
 from app.events import Event, WebSocketHub
 from app.hands.hands_iface import Hands
 from app.hands.stub_hands import StubHands
-from app.hands.windows_use_adapter import WindowsUseHands
+from app.hands.windows_mcp_adapter import WindowsMCPHands
 from app.llm.mistral_gateway import MistralGateway
 from app.storage.db import Storage
 from app.storage.paths import ensure_data_dirs
@@ -64,17 +64,25 @@ def _get_session_id(request: Request) -> str:
 
 def _hands_from_env() -> Hands:
     requested = os.environ.get("MARVOS_HANDS", "auto").lower()
+    print(f"[SERVER DEBUG] MARVOS_HANDS={requested}, os.name={os.name}")
     if requested == "stub":
+        print("[SERVER DEBUG] Using StubHands")
         return StubHands()
-    if requested in {"windows-use", "windows_use"}:
-        return WindowsUseHands()
+    if requested in {"windows-mcp", "windows_mcp", "windows-use", "windows_use"}:
+        print("[SERVER DEBUG] Using WindowsMCPHands (explicit)")
+        return WindowsMCPHands()
     if requested == "auto":
         if os.name == "nt":
             try:
-                return WindowsUseHands()
+                hands = WindowsMCPHands()
+                print(f"[SERVER DEBUG] Using WindowsMCPHands (auto)")
+                return hands
             except Exception as e:
-                return StubHands(note=f"StubHands in use; WindowsUseHands failed to start: {e}")
+                print(f"[SERVER DEBUG] WindowsMCPHands failed: {e}, using StubHands")
+                return StubHands(note=f"StubHands in use; WindowsMCPHands failed to start: {e}")
+        print("[SERVER DEBUG] Not Windows, using StubHands")
         return StubHands()
+    print(f"[SERVER DEBUG] Unknown MARVOS_HANDS value '{requested}', using StubHands")
     return StubHands()
 
 
@@ -90,6 +98,15 @@ async def _lifespan(app: FastAPI):
     hub = WebSocketHub(storage)
     hands = _hands_from_env()
     mistral = _mistral_from_env()
+    
+    # Log what we're using
+    print(f"\n{'='*60}")
+    print(f"MarvOS Server Starting")
+    print(f"{'='*60}")
+    print(f"Hands type: {type(hands).__name__}")
+    print(f"Model: {config.default_model}")
+    print(f"{'='*60}\n")
+    
     tools = build_default_registry(config=config, storage=storage, hub=hub, hands=hands, mistral=mistral)
     run_manager = RunManager(config=config, storage=storage, hub=hub, tools=tools, hands=hands, mistral=mistral)
     app.state.services = Services(

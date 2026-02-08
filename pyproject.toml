@@ -23,7 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 windows = [
-  "windows-use>=0.7.4",
+  "uiautomation>=2.0.29",
+  "fuzzywuzzy>=0.18.0",
 ]
 dev = [
   "pytest>=8.2.0",

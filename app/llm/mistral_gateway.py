@@ -82,12 +82,24 @@ class MistralGateway:
     ) -> AsyncIterator[dict[str, Any]]:
         client = self._require_client()
 
+        # Convert tool_choice to proper format for Mistral SDK
+        # The SDK expects tool_choice to be an object, not a string
+        tool_choice_param = "auto"  # Default
+        if tool_choice == "auto":
+            tool_choice_param = "auto"
+        elif tool_choice == "none":
+            tool_choice_param = "none"
+        elif tool_choice == "any" or tool_choice == "required":
+            tool_choice_param = "any"
+        
+        print(f"[MISTRAL DEBUG] Streaming with model={model}, tools={len(tools) if tools else 0}, tool_choice={tool_choice_param}")
+        
         # Use async streaming if available in the SDK version
         stream = await client.chat.stream_async(
             model=model,
             messages=messages,
             tools=tools,
-            tool_choice=tool_choice,
+            tool_choice=tool_choice_param,
         )
         async for chunk in stream:
             delta = chunk.data.choices[0].delta
