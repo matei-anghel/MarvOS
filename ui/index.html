@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MarvOS Agent</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("marvos_theme");
+          var theme = saved === "dark" || saved === "light"
+            ? saved
+            : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div class="brand">
+          <div id="marvin" class="marvin" aria-label="Marvin mascot"></div>
+          <div class="brandText">
+            <div class="title">MarvOS Agent</div>
+            <div class="subtitle">hands · eyes · voice</div>
+          </div>
+        </div>
+        <div class="controls">
+          <button id="themeBtn" class="ghost" title="Toggle theme">Theme: …</button>
+          <button id="stopBtn" class="danger" disabled>STOP</button>
+          <button id="micBtn" class="ghost">Dictation</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="left">
+          <div class="panel">
+            <div class="panel-title">Chat</div>
+            <div id="chatLog" class="chat"></div>
+            <div class="row inputWrap">
+              <textarea id="chatInput" placeholder="Ask the agent..." rows="2"></textarea>
+              <button id="sendBtn" class="accent">Send</button>
+            </div>
+            <div class="row presets">
+              <button data-preset="Organize my Downloads folder by file type.">Folder organizer</button>
+              <button data-preset="Change a Windows setting: show file extensions.">Windows setting</button>
+              <button data-preset="In PowerShell, find the 10 largest files under my home directory.">Terminal utility</button>
+              <button data-preset="Use vibe-cli to build a simple website, then inspect the result via screenshot and propose fixes.">Vibe-cli loop</button>
+              <button data-preset="Plan a Paris trip for next week. If needed, create a persistent cloud agent first.">Paris trip</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="right">
+          <div class="panel">
+            <div class="panel-title">Run Inspector</div>
+            <div id="statusLine" class="status">Idle</div>
+            <div id="eventsLog" class="events"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">Vision</div>
+            <div class="vision">
+              <img id="visionImg" alt="screenshot" />
+              <pre id="visionText"></pre>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="approvalModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-title">Approval required</div>
+        <div id="approvalSummary" class="modal-body"></div>
+        <div class="modal-actions">
+          <button id="approveBtn" class="danger">Approve</button>
+          <button id="denyBtn" class="ghost">Deny</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

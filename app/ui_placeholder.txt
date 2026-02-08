@@ -1,0 +1,2 @@
+This file exists only to keep the directory in VCS when the UI is not yet generated.
+
