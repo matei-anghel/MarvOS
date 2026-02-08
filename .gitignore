@@ -9,3 +9,4 @@ build/
 data/
 *.log
 
+marvos_windows_llm_ui.egg-info/
