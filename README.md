@@ -21,6 +21,21 @@
 
 ---
 
+<p align="center">
+  <strong>Chat Interface</strong><br/>
+  <img src="images/home%20page.jpeg" alt="Home Page" width="700"/>
+</p>
+
+<p align="center">
+  <strong>Terminal Use Capability</strong><br/>
+  <img src="images/terminal%20use.jpeg" alt="Terminal Use" width="700"/>
+</p>
+
+<p align="center">
+  <strong>Windows Use Capability</strong><br/>
+  <img src="images/windows%20use.jpeg" alt="Windows Use" width="700"/>
+</p>
+
 ## ✨ Features
 
 ### 🎯 **Intelligent Desktop Automation**
