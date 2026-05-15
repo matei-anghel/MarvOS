@@ -5,7 +5,7 @@
 <h1 align="center">🤖 MarvOS</h1>
 
 <p align="center">
-  <strong>Your AI-Powered Desktop Agent for Windows</strong>
+  <strong>Your AI Desktop Agent for Windows</strong>
 </p>
 
 <p align="center">
@@ -287,31 +287,14 @@ Marvin is our pixel-art mascot — a friendly (if slightly paranoid) android ins
 
 ## 📜 License
 
-This project is **proprietary software**. All rights reserved.
+This project is licensed under the **MIT License**.
 
-For licensing inquiries, please contact the maintainers.
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our contributing guidelines (coming soon) for details on:
-
-- Code style and conventions
-- Testing requirements
-- Pull request process
-
----
-
-## 📬 Support
-
-- **Issues:** [GitHub Issues](https://github.com/yourusername/MarvOS/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/yourusername/MarvOS/discussions)
+See the [LICENSE](LICENSE) file for details.
 
 ---
 
 <p align="center">
-  <strong>Built with 💚 and existential dread by the MarvOS Team</strong>
+  <strong>Built with 💚 and existential dread</strong>
 </p>
 
 <p align="center">
