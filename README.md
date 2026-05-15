@@ -12,7 +12,6 @@
   <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/platform-Windows-0078D6.svg" alt="Windows"/>
   <img src="https://img.shields.io/badge/AI-Mistral-orange.svg" alt="Powered by Mistral"/>
-  <img src="https://img.shields.io/badge/license-Proprietary-red.svg" alt="Proprietary License"/>
 </p>
 
 <p align="center">
