@@ -11,16 +11,19 @@ class _Pending:
 
 class ApprovalManager:
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
         self._pending: dict[str, _Pending] = {}
 
+    def register(self, *, tool_call_id: str) -> None:
+        """Create the pending slot before the UI is told to ask, so a fast reply is not lost."""
+        if tool_call_id not in self._pending:
+            self._pending[tool_call_id] = _Pending(future=asyncio.get_running_loop().create_future())
+
     async def wait(self, *, tool_call_id: str) -> str:
-        async with self._lock:
-            pending = self._pending.get(tool_call_id)
-            if pending is None:
-                pending = _Pending(future=asyncio.get_event_loop().create_future())
-                self._pending[tool_call_id] = pending
-        return await pending.future
+        self.register(tool_call_id=tool_call_id)
+        try:
+            return await self._pending[tool_call_id].future
+        finally:
+            self._pending.pop(tool_call_id, None)
 
     def resolve(self, *, tool_call_id: str, decision: str, note: str = "") -> bool:
         if decision not in {"approve", "deny"}:
@@ -32,6 +35,4 @@ class ApprovalManager:
         if pending.future.done():
             return False
         pending.future.set_result(decision)
-        self._pending.pop(tool_call_id, None)
         return True
-

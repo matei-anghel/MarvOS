@@ -9,10 +9,9 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
-
-log = logging.getLogger(__name__)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.agent.runner import RunManager
@@ -25,6 +24,55 @@ from app.llm.mistral_gateway import MistralGateway
 from app.storage.db import Storage
 from app.storage.paths import ensure_data_dirs
 from app.tools.registry import ToolRegistry, build_default_registry
+
+log = logging.getLogger(__name__)
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _allowed_hosts() -> set[str]:
+    extra = os.environ.get("MARVOS_ALLOWED_HOSTS", "")
+    return _LOOPBACK_HOSTS | {h.strip().lower() for h in extra.split(",") if h.strip()}
+
+
+class LocalOriginGuard:
+    """Reject requests that did not come from the app's own UI.
+
+    The server can run shell commands and drive the desktop, so any web page the user
+    visits must not be able to reach it. Two checks:
+    - Host must be a loopback name (blocks DNS-rebinding attacks).
+    - If an Origin header is present (browsers always send it on cross-origin fetches
+      and WebSocket handshakes), it must match the Host exactly (blocks CSRF and
+      cross-site WebSocket hijacking).
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        host = headers.get("host", "")
+        origin = headers.get("origin")
+        hostname = (urlsplit(f"//{host}").hostname or "").lower()
+
+        allowed = hostname in _allowed_hosts()
+        if allowed and origin is not None:
+            allowed = urlsplit(origin).netloc.lower() == host.lower()
+
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+
+        log.warning("Rejected request: host=%r origin=%r path=%r", host, origin, scope.get("path"))
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        response = JSONResponse({"error": "forbidden"}, status_code=403)
+        await response(scope, receive, send)
 
 
 def _normalize_history_messages(raw: Any) -> list[dict[str, str]]:
@@ -153,6 +201,7 @@ async def _lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="MarvOS Agent", lifespan=_lifespan)
+    app.add_middleware(LocalOriginGuard)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

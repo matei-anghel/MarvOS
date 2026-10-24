@@ -26,6 +26,8 @@ dependencies = [
 windows = [
   "uiautomation>=2.0.29",
   "fuzzywuzzy>=0.18.0",
+  "pyautogui>=0.9.54",
+  "pywin32>=306",
 ]
 dev = [
   "pytest>=8.2.0",
