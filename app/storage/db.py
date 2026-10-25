@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,8 +36,18 @@ class Storage:
         conn.execute("PRAGMA foreign_keys=ON;")
         return conn
 
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3's own context manager commits/rolls back but never closes the connection.
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -86,7 +98,7 @@ class Storage:
             )
 
     def ensure_session(self, session_id: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
             if row:
                 return
@@ -96,7 +108,7 @@ class Storage:
             )
 
     def put_kv(self, key: str, value: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
@@ -106,13 +118,13 @@ class Storage:
             )
 
     def get_kv(self, key: str) -> str | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
             return None if row is None else str(row["value"])
 
     def delete_kv(self, key: str) -> None:
         """Delete a key-value pair from storage."""
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.execute("DELETE FROM kv WHERE key = ?", (key,))
 
     def create_run(
@@ -125,7 +137,7 @@ class Storage:
         options: dict[str, Any],
         message_history: list[dict[str, Any]],
     ) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO runs (
@@ -162,11 +174,11 @@ class Storage:
             params.append(json.dumps(message_history))
         params.append(run_id)
 
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.execute(f"UPDATE runs SET {', '.join(fields)} WHERE id = ?", params)
 
     def add_event(self, *, session_id: str, run_id: str | None, type: str, payload: dict[str, Any]) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.execute(
                 "INSERT INTO events (session_id, run_id, ts, type, payload_json) VALUES (?, ?, ?, ?, ?)",
                 (session_id, run_id, _utc_now_iso(), type, json.dumps(payload)),
@@ -182,7 +194,7 @@ class Storage:
         mime: str,
         path: str,
     ) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO artifacts (id, session_id, run_id, kind, mime, path, created_at)
@@ -192,7 +204,7 @@ class Storage:
             )
 
     def get_artifact(self, artifact_id: str) -> StoredArtifact | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._transaction() as conn:
             row = conn.execute(
                 "SELECT id, kind, mime, path FROM artifacts WHERE id = ?",
                 (artifact_id,),

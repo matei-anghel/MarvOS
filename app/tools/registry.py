@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Type
 
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from app.config import AppConfig
 from app.events import Event, WebSocketHub
@@ -29,7 +32,8 @@ class _ShellExecArgs(BaseModel):
     command: str
     cwd: str | None = None
     timeout_s: int = Field(default=30, ge=1, le=600)
-    approved_by_user: bool = False
+    # Set only by the runner after the user approves; hidden from the model's schema.
+    approved_by_user: SkipJsonSchema[bool] = False
 
 
 class _FsListArgs(BaseModel):
@@ -136,6 +140,39 @@ class _ResearchExecutePlanWithHandsArgs(BaseModel):
 ToolHandler = Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]]
 
 
+# Commands that only read state. Matched against the first word of every pipeline
+# segment, so arguments cannot smuggle in other commands.
+_READ_ONLY_PS_COMMANDS = {
+    "select-object", "select", "where-object", "where", "?", "sort-object", "sort",
+    "measure-object", "measure", "group-object", "group",
+    "format-table", "ft", "format-list", "fl", "format-wide", "fw", "out-string",
+    "write-host", "write-output", "echo", "convertto-json", "convertto-csv",
+    "test-path", "resolve-path", "split-path", "join-path",
+    "ls", "dir", "gci", "gc", "cat", "type", "gi", "gp", "gps", "ps", "gsv", "pwd",
+    "hostname", "whoami",
+}
+# Constructs that can run arbitrary code inside an otherwise read-only command:
+# script blocks, subexpressions/grouping, redirection, call operators, .NET
+# static calls, method invocations, and escape characters.
+_UNSAFE_PS_SYNTAX = re.compile(r"[{}()<>&@`]|::|\.\w+\s*\(")
+
+
+def is_read_only_powershell(command: str) -> bool:
+    cmd = command.strip()
+    if not cmd or _UNSAFE_PS_SYNTAX.search(cmd):
+        return False
+    for segment in re.split(r"[|;\r\n]+", cmd):
+        segment = segment.strip()
+        if not segment:
+            continue
+        verb = segment.split()[0].lower()
+        if verb.startswith("get-"):
+            continue
+        if verb not in _READ_ONLY_PS_COMMANDS:
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class ToolDef:
     name: str
@@ -153,35 +190,13 @@ class ToolDef:
         """Check if approval is needed based on tool and arguments."""
         if self.risk == "LOW":
             return False
-        # For PowerShell, check if command is read-only
+        # For PowerShell, skip approval only for plainly read-only commands
         if self.name == "shell.exec_powershell":
-            cmd = str(args.get("command", "")).lower()
-            # List of read-only/safe commands
-            safe_patterns = [
-                "get-", "select-", "where-", "sort-", "measure-",
-                "write-host", "echo", "format-", "convertTo-",
-                "test-path", "resolve-path", "split-path", "join-path",
-                "get-childitem", "gci", "ls", "dir",
-                "get-content", "gc", "cat", "type",
-            ]
-            # Dangerous patterns that override safety
-            dangerous_patterns = [
-                "remove-", "rm ", "del ", "erase", "rmdir",
-                "new-item", "ni ", "mkdir", "md ",
-                "set-", "clear-", "stop-", "restart-",
-                "invoke-webrequest", "iwr", "wget", "curl",
-                "start-process", "&", "invoke-expression", "iex",
-            ]
-            # Check for dangerous patterns first
-            if any(p in cmd for p in dangerous_patterns):
-                print(f"[APPROVAL] PowerShell command requires approval (dangerous): {cmd[:100]}")
-                return True
-            # If only safe patterns, no approval needed
-            if any(p in cmd for p in safe_patterns):
+            cmd = str(args.get("command", ""))
+            if is_read_only_powershell(cmd):
                 print(f"[APPROVAL] PowerShell command auto-approved (read-only): {cmd[:100]}")
                 return False
-            # Unknown command - require approval to be safe
-            print(f"[APPROVAL] PowerShell command requires approval (unknown): {cmd[:100]}")
+            print(f"[APPROVAL] PowerShell command requires approval: {cmd[:100]}")
             return True
         return self.risk in {"HIGH", "MEDIUM"}
 
@@ -235,7 +250,23 @@ def build_default_registry(
     hands: Hands,
     mistral: MistralGateway,
 ) -> ToolRegistry:
-    artifacts_dir = Path(os.environ.get("MARVOS_DATA_DIR", "")) / "artifacts" if os.environ.get("MARVOS_DATA_DIR") else None
+    async def save_screenshot(b64: str, session_id: str, run_id: str) -> str:
+        """Persist a base64 PNG to the artifacts directory and return its artifact id."""
+        from app.storage.paths import ensure_data_dirs
+
+        artifact_id = uuid.uuid4().hex
+        path = ensure_data_dirs()["artifacts"] / f"{artifact_id}.png"
+        path.write_bytes(base64.b64decode(b64))
+        storage.add_artifact(
+            artifact_id=artifact_id,
+            session_id=session_id,
+            run_id=run_id,
+            kind="screenshot",
+            mime="image/png",
+            path=str(path),
+        )
+        await hub.publish(session_id, run_id, Event("artifact.created", {"run_id": run_id, "artifact_id": artifact_id, "kind": "screenshot"}))
+        return artifact_id
 
     async def hands_observe(args: dict[str, Any], session_id: str, run_id: str) -> dict[str, Any]:
         print(f"[REGISTRY DEBUG] hands_observe called with args: {args}")
@@ -244,23 +275,7 @@ def build_default_registry(
             print(f"[REGISTRY DEBUG] hands.observe returned: {len(obs.get('interactive_elements', []))} elements, error: {obs.get('error', 'None')}")
             b64 = obs.pop("screenshot_base64_png", None)
             if b64:
-                artifact_id = uuid.uuid4().hex
-                # Persist artifact to the app's artifacts directory
-                from app.storage.paths import ensure_data_dirs
-
-                paths = ensure_data_dirs()
-                path = paths["artifacts"] / f"{artifact_id}.png"
-                path.write_bytes(__import__("base64").b64decode(b64))
-                storage.add_artifact(
-                    artifact_id=artifact_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    kind="screenshot",
-                    mime="image/png",
-                    path=str(path),
-                )
-                await hub.publish(session_id, run_id, Event("artifact.created", {"run_id": run_id, "artifact_id": artifact_id, "kind": "screenshot"}))
-                obs["screenshot_artifact_id"] = artifact_id
+                obs["screenshot_artifact_id"] = await save_screenshot(b64, session_id, run_id)
             print(f"[REGISTRY DEBUG] hands_observe returning success")
             return {"ok": True, "data": obs}
         except Exception as e:
@@ -313,12 +328,17 @@ def build_default_registry(
         from app.tools.shell import exec_powershell
         
         path = args.get("path", "C:\\")
-        count = args.get("count", 10)
-        
+        count = int(args.get("count", 10))
+
+        # The model often passes '$env:USERPROFILE'; expand that ourselves instead of letting
+        # PowerShell evaluate the string, which would also run any $(...) in it.
+        expanded = re.sub(r"(?i)\$env:(\w+)", lambda m: os.environ.get(m.group(1), m.group(0)), path)
+        quoted_path = "'" + expanded.replace("'", "''") + "'"
+
         # Use direct Get-ChildItem on the specified path with error handling
         # This is simpler and more reliable than robocopy gymnastics
         cmd = f'''
-$path = "{path}"
+$path = {quoted_path}
 if (-not (Test-Path $path)) {{
     Write-Error "Path not found: $path"
     exit 1
@@ -534,6 +554,10 @@ Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue |
                 engine=args.get("engine", "google"),
                 direction=args.get("direction", "down"),
             )
+            # Keep raw image bytes out of the model's message history; store an artifact instead.
+            b64 = result.pop("screenshot_base64", None)
+            if b64:
+                result["screenshot_artifact_id"] = await save_screenshot(b64, session_id, run_id)
             return result
         except Exception as e:
             return {"ok": False, "error": f"Web browse failed: {e}"}

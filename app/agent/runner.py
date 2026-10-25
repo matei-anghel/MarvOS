@@ -146,13 +146,16 @@ class RunManager:
             runtime = self._runs[run_id]
 
         try:
-            await self._agent_loop(
+            canceled = await self._agent_loop(
                 session_id=session_id,
                 run_id=run_id,
                 runtime=runtime,
                 message_history=message_history,
                 options=options,
             )
+            if canceled:
+                # _agent_loop already recorded and published the canceled status.
+                return
             await asyncio.to_thread(self._storage.update_run, run_id=run_id, status=RunStatus.succeeded.value, message_history=message_history)
             await self._hub.publish(session_id, run_id, Event("run.status", {"run_id": run_id, "status": RunStatus.succeeded.value}))
         except asyncio.CancelledError:
@@ -177,16 +180,17 @@ class RunManager:
         runtime: _RunRuntime,
         message_history: list[dict[str, Any]],
         options: RunOptions,
-    ) -> None:
+    ) -> bool:
+        """Run the model/tool loop. Returns True if the run was canceled."""
         steps = 0
         recent_actions: list[str] = []  # Track recent actions to detect loops
         max_repeated_actions = 3  # How many times the same action can repeat before we consider it a loop
-        
+
         while True:
             if runtime.cancel.is_set():
                 await asyncio.to_thread(self._storage.update_run, run_id=run_id, status=RunStatus.canceled.value, message_history=message_history)
                 await self._hub.publish(session_id, run_id, Event("run.status", {"run_id": run_id, "status": RunStatus.canceled.value}))
-                return
+                return True
 
             if steps >= options.max_steps:
                 await self._hub.publish(
@@ -194,20 +198,20 @@ class RunManager:
                     run_id,
                     Event("assistant.final", {"run_id": run_id, "text": "Stopped: step limit reached."}),
                 )
-                return
-            
+                return False
+
             # Check for action loops (e.g., scrolling forever)
             if len(recent_actions) >= max_repeated_actions:
                 # Check if last N actions are all the same type
                 last_n = recent_actions[-max_repeated_actions:]
-                if len(set(last_n)) == 1 and last_n[0] in ['scroll', 'hands.observe']:
+                if len(set(last_n)) == 1 and last_n[0] in ['hands.act.scroll', 'hands.observe']:
                     # Agent is stuck in a scroll loop
                     await self._hub.publish(
                         session_id,
                         run_id,
                         Event("assistant.final", {"run_id": run_id, "text": "I've scrolled several times but can't find what I'm looking for. The setting might be on a different page or I need different search terms."}),
                     )
-                    return
+                    return False
 
             steps += 1
             tools_schema = self._tools.to_mistral_tools()
@@ -227,6 +231,8 @@ class RunManager:
                 tools=tools_schema,
                 tool_choice="auto",
             ):
+                if runtime.cancel.is_set():
+                    break
                 delta = chunk.get("delta")
                 if not delta:
                     continue
@@ -262,17 +268,21 @@ class RunManager:
                             if tc.function.arguments:
                                 tool_calls_acc[idx]["function"]["arguments"] += tc.function.arguments
 
+            if runtime.cancel.is_set():
+                continue
+
             # Build the assistant message to append to history
             assistant_message: dict[str, Any] = {"role": "assistant", "content": full_content}
-            
+
             if tool_calls_acc:
                 # Convert accumulated dict to list sorted by index
                 sorted_tcs = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
-                assistant_message["tool_calls"] = sorted_tcs
                 print(f"[DEBUG] Total tool calls accumulated: {len(sorted_tcs)}")
+                # We execute one tool per step. Keep only the first call so every tool call
+                # in history gets a matching tool result (the API rejects unanswered calls).
+                assistant_message["tool_calls"] = sorted_tcs[:1]
 
-            if assistant_message:
-                message_history.append(assistant_message)
+            message_history.append(assistant_message)
 
             tool_calls = assistant_message.get("tool_calls") or []
             print(f"[DEBUG] Final tool_calls count: {len(tool_calls)}")
@@ -282,10 +292,7 @@ class RunManager:
                 print(f"[DEBUG] No tool calls, returning final response: '{full_content}'")
                 print(f"[DEBUG] Full assistant_message: {assistant_message}")
                 await self._hub.publish(session_id, run_id, Event("assistant.final", {"run_id": run_id, "text": full_content}))
-                return
-
-            if len(tool_calls) != 1:
-                raise RuntimeError("Tool calling contract violated: expected exactly one tool call.")
+                return False
 
             tool_call = tool_calls[0]
             tool_call_id = str(tool_call.get("id") or "")
@@ -295,22 +302,15 @@ class RunManager:
             
             # Clean up malformed tool names - extract just the tool name without arguments
             # Handle cases like: "hands.observe({\"include_screenshot\": true}) garbage"
-            import re
-            valid_tool_pattern = r'^(hands\.observe|hands\.act|shell\.exec_powershell|fs\.list|fs\.mkdir|fs\.move|fs\.rename|fs\.delete|fs\.find_large|vision\.inspect_screenshot|mistral_agents\.create|mistral_agents\.chat|dictation\.transcribe|user\.confirm|research\.search_agents|research\.setup_agent|research\.ask_clarifying_questions|research\.generate_plan|research\.execute_step|research\.execute_plan_with_hands|web\.browse)'
-            match = re.match(valid_tool_pattern, raw_tool_name)
-            if match:
-                tool_name = match.group(1)
-                print(f"[DEBUG] Cleaned tool name from '{raw_tool_name[:50]}...' to '{tool_name}'")
+            if raw_tool_name in self._tools.tools:
+                tool_name = raw_tool_name
             else:
-                # Try to find the tool name anywhere in the string
-                for valid_name in self._tools.tools.keys():
-                    if valid_name in raw_tool_name:
-                        tool_name = valid_name
-                        print(f"[DEBUG] Extracted tool name '{tool_name}' from '{raw_tool_name[:50]}...'")
-                        break
-                else:
-                    tool_name = raw_tool_name
-                    print(f"[DEBUG WARNING] Could not clean tool name: '{raw_tool_name[:100]}'")
+                # Prefer the longest registered name the string starts with, then any it contains.
+                names = sorted(self._tools.tools.keys(), key=len, reverse=True)
+                tool_name = next((n for n in names if raw_tool_name.startswith(n)), None) or next(
+                    (n for n in names if n in raw_tool_name), raw_tool_name
+                )
+                print(f"[DEBUG] Cleaned tool name from '{raw_tool_name[:50]}...' to '{tool_name}'")
             
             # Parse arguments with error handling
             try:
@@ -329,9 +329,16 @@ class RunManager:
                         print(f"[DEBUG] Extracted valid JSON from args")
                     else:
                         args = {}
-                except:
+                except Exception:
                     args = {}
-            
+            if not isinstance(args, dict):
+                args = {}
+            # Only the runner may mark a command as user-approved.
+            args.pop("approved_by_user", None)
+            # Store the cleaned call in history: the API rejects malformed names/JSON on the next request.
+            fn["name"] = tool_name
+            fn["arguments"] = json.dumps(args)
+
             print(f"[DEBUG] Executing tool: {tool_name} with args: {args}")
             print(f"[DEBUG] Available tools: {list(self._tools.tools.keys())}")
             
@@ -340,7 +347,8 @@ class RunManager:
             if tool_name == 'hands.act' and args.get('actions'):
                 # Extract the actual action type from hands.act
                 first_action = args['actions'][0] if isinstance(args['actions'], list) else args['actions']
-                action_type = f"hands.act.{first_action.get('type', 'unknown')}"
+                if isinstance(first_action, dict):
+                    action_type = f"hands.act.{first_action.get('type', 'unknown')}"
             recent_actions.append(action_type)
             if len(recent_actions) > 10:  # Keep last 10 actions
                 recent_actions.pop(0)
@@ -393,6 +401,7 @@ class RunManager:
                         continue
 
                 if tool_def.requires_approval_for_args(args) and not (options.auto_approve_medium and tool_def.risk == "MEDIUM"):
+                    runtime.approvals.register(tool_call_id=tool_call_id)
                     await self._hub.publish(
                         session_id,
                         run_id,
@@ -409,7 +418,19 @@ class RunManager:
                     )
                     await asyncio.to_thread(self._storage.update_run, run_id=run_id, status=RunStatus.awaiting_approval.value)
                     await self._hub.publish(session_id, run_id, Event("run.status", {"run_id": run_id, "status": RunStatus.awaiting_approval.value}))
-                    decision = await runtime.approvals.wait(tool_call_id=tool_call_id)
+                    # Wait for the user, but let Cancel interrupt the wait.
+                    approval_task = asyncio.ensure_future(runtime.approvals.wait(tool_call_id=tool_call_id))
+                    cancel_task = asyncio.ensure_future(runtime.cancel.wait())
+                    await asyncio.wait({approval_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+                    cancel_task.cancel()
+                    if not approval_task.done():
+                        approval_task.cancel()
+                        message_history.append(tool_result_message(
+                            tool_name=tool_name, tool_call_id=tool_call_id,
+                            result={"ok": False, "error": "Run canceled by user."},
+                        ))
+                        continue
+                    decision = approval_task.result()
                     await self._hub.publish(
                         session_id,
                         run_id,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.tools.registry import ToolRegistry
@@ -15,6 +16,8 @@ class PromptPack:
 
 def build_prompts(tools: ToolRegistry) -> PromptPack:
     tool_names = ", ".join(sorted(tools.tools.keys()))
+    # Same folder STEP 1 creates ($env:USERPROFILE\my-website), with backslashes doubled as in the other examples.
+    example_project_dir = str(Path.home() / "my-website").replace("\\", "\\\\")
     system = (
         "You are Marvin, a Windows automation assistant. You can call tools to observe the desktop and act with mouse/keyboard/shell.\n\n"
         "PERSONALITY (CRITICAL):\n"
@@ -47,7 +50,7 @@ def build_prompts(tools: ToolRegistry) -> PromptPack:
         "    (This is safe, non-interactive, and doesn't need a visible terminal.)\n\n"
         "  STEP 2 — hands.act: Launch terminal and run vibe with the prompt as an argument\n"
         "    actions: [\n"
-        "      {type:'launch', app:'wt', cwd:'C:\\\\Users\\\\matei\\\\my-website'},\n"
+        f"      {{type:'launch', app:'wt', cwd:'{example_project_dir}'}},\n"
         "      {type:'wait', ms:3000},\n"
         "      {type:'type', text:'uvx --from mistral-vibe vibe \"Build a simple website with HTML CSS and JS\"', submit:true},\n"
         "      {type:'wait', ms:60000}\n"

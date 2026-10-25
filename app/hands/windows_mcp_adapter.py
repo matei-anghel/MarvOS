@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import csv
 import io
@@ -49,6 +50,7 @@ class TreeElementNode:
     value: str
     shortcut: str
     is_focused: bool
+    toggle_state: str | None = None
 
 
 class WindowsMCPHands(Hands):
@@ -114,6 +116,7 @@ class WindowsMCPHands(Hands):
                             "window": elem.window_name,
                             "is_focused": elem.is_focused,
                             "value": elem.value if elem.value else None,
+                            "toggle_state": elem.toggle_state,
                             "shortcut": elem.shortcut if elem.shortcut else None,
                         })
                     
@@ -253,7 +256,18 @@ class WindowsMCPHands(Hands):
                                         shortcut = getattr(control, 'AcceleratorKey', '') or ""
                                     except:
                                         pass
-                                    
+
+                                    # Toggle switches (e.g. Night light) expose on/off only via the
+                                    # Toggle pattern; their legacy Value is empty.
+                                    toggle_state = None
+                                    try:
+                                        toggle = control.GetTogglePattern()
+                                        if toggle:
+                                            toggle_state = {0: "off", 1: "on", 2: "indeterminate"}.get(
+                                                int(getattr(toggle, 'ToggleState', -1)))
+                                    except Exception:
+                                        pass
+
                                     elem = TreeElementNode(
                                         name=name.strip(),
                                         control_type=control_type.replace('Control', '').lower(),
@@ -263,7 +277,8 @@ class WindowsMCPHands(Hands):
                                         xpath="",
                                         value=value.strip(),
                                         shortcut=shortcut,
-                                        is_focused=is_focused
+                                        is_focused=is_focused,
+                                        toggle_state=toggle_state,
                                     )
                                     elements.append(elem)
                     except Exception as e:
@@ -366,7 +381,8 @@ class WindowsMCPHands(Hands):
                 elif kind == "wait":
                     ms = int(action.get("ms") or 0)
                     if ms > 0:
-                        time.sleep(ms / 1000.0)
+                        # Don't block the event loop: long waits would freeze the UI and Cancel.
+                        await asyncio.sleep(ms / 1000.0)
                     performed.append({"type": kind, "ok": True, "ms": ms})
                 
                 elif kind == "launch":
@@ -400,11 +416,11 @@ class WindowsMCPHands(Hands):
         
         if "element_label" in action:
             # Get current state to resolve label
-            label = action["element_label"]
+            label = int(action["element_label"])
             root = self._auto.GetForegroundControl()
             if root:
                 elements = self._get_interactive_elements(root, "")
-                if label < len(elements):
+                if 0 <= label < len(elements):
                     x, y = elements[label].center.x, elements[label].center.y
                 else:
                     return {"type": "click", "ok": False, 
@@ -458,11 +474,11 @@ class WindowsMCPHands(Hands):
         # Get coordinates
         x, y = None, None
         if "element_label" in action:
-            label = action["element_label"]
+            label = int(action["element_label"])
             root = self._auto.GetForegroundControl()
             if root:
                 elements = self._get_interactive_elements(root, "")
-                if label < len(elements):
+                if 0 <= label < len(elements):
                     x, y = elements[label].center.x, elements[label].center.y
                 else:
                     return {"type": "type", "ok": False, 
@@ -557,11 +573,11 @@ class WindowsMCPHands(Hands):
         # Get coordinates if specified
         x, y = None, None
         if "element_label" in action:
-            label = action["element_label"]
+            label = int(action["element_label"])
             root = self._auto.GetForegroundControl()
             if root:
                 elements = self._get_interactive_elements(root, "")
-                if label < len(elements):
+                if 0 <= label < len(elements):
                     x, y = elements[label].center.x, elements[label].center.y
         elif "x" in action and "y" in action:
             x, y = int(action["x"]), int(action["y"])

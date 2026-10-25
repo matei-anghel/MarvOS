@@ -6,6 +6,7 @@ import base64
 import json
 import os
 from typing import Any
+from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, Page, Browser
 
@@ -53,9 +54,9 @@ class WebBrowser:
         
         try:
             if engine == "google":
-                await self._page.goto(f"https://www.google.com/search?q={query}", wait_until="networkidle")
+                await self._page.goto(f"https://www.google.com/search?q={quote_plus(query)}", wait_until="networkidle")
             elif engine == "bing":
-                await self._page.goto(f"https://www.bing.com/search?q={query}", wait_until="networkidle")
+                await self._page.goto(f"https://www.bing.com/search?q={quote_plus(query)}", wait_until="networkidle")
             else:
                 return {"ok": False, "error": f"Unknown search engine: {engine}"}
             
@@ -97,7 +98,8 @@ class WebBrowser:
             if selector:
                 text = await self._page.text_content(selector)
             else:
-                text = await self._page.content()
+                # Visible text, not raw HTML (markup and scripts would eat the 10k budget).
+                text = await self._page.inner_text("body")
             return {"ok": True, "text": text[:10000] if text else ""}  # Limit text size
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -193,16 +195,22 @@ async def web_browse(
         if browser_key in _browser_instances:
             return {"ok": True, "status": "Browser already running"}
         browser = WebBrowser()
-        _browser_instances[browser_key] = browser
-        return await browser.start()
+        result = await browser.start()
+        # Only cache a browser that actually started, so a failed launch can be retried.
+        if result["ok"]:
+            _browser_instances[browser_key] = browser
+        else:
+            await browser.close()
+        return result
     
     if browser_key not in _browser_instances:
         # Auto-start browser if not running
         browser = WebBrowser()
-        _browser_instances[browser_key] = browser
         start_result = await browser.start()
         if not start_result["ok"]:
+            await browser.close()
             return start_result
+        _browser_instances[browser_key] = browser
     
     browser = _browser_instances[browser_key]
     
